@@ -1,0 +1,27 @@
+version: '3.8'
+
+# Hermes Sync Hub - 写入隔离 + 渐进式披露
+# 适用 99 人以内小公司，Docker 单机部署
+
+services:
+  sync-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hermes-sync-hub
+    ports:
+      - "3060:3060"
+    volumes:
+      - hub-data:/app/data
+      - ./main.py:/app/main.py
+      - ./dashboard:/app/dashboard
+    restart: unless-stopped
+    healthcheck:
+      # 基础镜像 python:3.11-slim 无 curl，改用 python urllib 探活
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3060/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  hub-data:

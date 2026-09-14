@@ -1,0 +1,84 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.spec
+# CD-036: PyInstaller 打包决策随仓(datas 只带 dashboard+examples/showcase, 不带 config/chroma_db)
+!sync_hub.spec
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Database
+sync_hub.db
+sync_hub.db-journal
+sync_hub.db-wal
+sync_hub.db-shm
+*.local_cache.db
+*_local_cache.db
+
+# ChromaDB
+chroma_db/
+
+# Config (copy config.example.yaml → config/config.yaml)
+config/config.yaml
+config/backups/*.db
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Misc
+.vfy_*
+.hermes/
+
+# hub_ui 前端（U1：产物 gitignore + 发版打包；node_modules 不入库）
+hub_ui/node_modules/
+dashboard_dist/
+
+# 集成层凭证（含 master.key，严禁入库）
+integration_keys/
+
+# 阶段3 主干-分干数据底座（运行数据，git 仓库群真相源本体不入库）
+data-trunk/
+
+# ── 测试产物（pytest/e2e 运行数据，不入库）──
+wiki/concepts/p2k-*.md
+wiki/concepts/memory-p2s-*.md
+wiki/concepts/memory-mem_*.md
+wiki/concepts/memory-sm1.md
+wiki/concepts/memory-u4-*.md
+wiki/concepts/intg-dummy2-*.md
+wiki/concepts/intg-example-connector-*.md
+audit/anchor.txt
+test-o1.db*
+test-s4.db*
+tests/p2-rerun-*.json
+tests/p2-stress-results-p2-baseline.json
+tests/p3-stress-results.json
+
+# ── 清理 2026-09-10：临时脚本 / 生成物 / 本地运行残留（不入库）──
+node_modules/
+backups/
+.tools/
+replay_nonce.db
+fix_*.py
+e2e_settings.py
+create_intro.js
+wiki/concepts/memory-e2e-secret.md

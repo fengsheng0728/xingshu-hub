@@ -1,0 +1,57 @@
+name: CI 门禁
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    name: 全量回归（离线集）
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: 安装依赖
+        # D-5 3-5a：依赖分层后 CI 仍装全量（核心 + 可选向量栈），保持 CI 行为不变
+        run: pip install -r requirements.txt -r requirements-vector.txt pytest
+
+      - name: Import 红线（routes 可导入）
+        run: python -c "from routes import app"
+
+      - name: Ruff lint（E722 裸 except 零容忍门禁，T2-6）
+        run: pip install ruff && ruff check .
+
+      - name: 全量回归门禁（排除连真实 Hub 的集成测试）
+        # 离线集 = 全量 - test_team_integration(需真实 Hub) - guard_identity 5 个连 Hub 用例
+        # 基线 2026-09-02 实测：468 passed - 5 guard 集成 - team_integration N = 离线集 passed
+        # 任何失败/错误 → pytest 非 0 退出 → 本步红 → 门禁拦下
+        run: python -m pytest tests/ -q -k "not test_cross_agent_403 and not test_memory_search_self_access and not test_memory_list_self_access" --ignore=tests/test_team_integration.py
+
+      - name: 测试统计（仅展示，不阻断）
+        if: always()
+        run: |
+          echo "CI 离线集回归完成（详细统计见上一步输出）"
+
+  docker-build:
+    name: Docker 镜像构建 + compose 校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 真实构建纳入 CI：本机开发环境 Docker 引擎不可用，此 job 是 docker build 唯一实跑点
+      - name: 构建镜像（不 push）
+        run: docker build -t xingshu-hub:ci .
+
+      # 校验 compose 配置可解析（含 healthcheck 语法）
+      - name: docker compose config 校验
+        run: docker compose config --quiet
+
+      # 取舍说明：不做 docker run + health 冒烟——镜像含 chromadb/sentence-transformers
+      # 等重依赖，容器首次启动需拉模型/建库，耗时不可控；build + config 校验已覆盖
+      # Dockerfile 语法、依赖安装与 compose 语法三类本任务书修复点。

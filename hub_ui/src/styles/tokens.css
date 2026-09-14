@@ -1,0 +1,53 @@
+/* ══════════════════════════════════════════════════════════════
+   星枢 Hub 控制台 — Design Tokens（hub-ui-redesign.md §2 严格执行）
+   轻拟物 Soft Skeuomorphism：凸起只用双向柔和投影，禁深色边框叠投影；
+   亮暗同稿，光源方向一致（左上 45°）。
+   ══════════════════════════════════════════════════════════════ */
+
+:root {
+  /* 亮色（默认）：拟物光影的载体是"有色底"，纯白底上做不出凸起 */
+  --bg-0: #e8ebf0;   /* 页面底：冷灰，光影画布 */
+  --bg-1: #eef1f5;   /* 面板：与底色近色相，凸起全靠光影而非色差 */
+  --bg-2: #f5f7fa;   /* 悬浮/抽屉 */
+  --border: #d4dae3; /* 仅数据区使用 */
+  --text-0: #2a3442;
+  --text-1: #5d6b7e;
+  --text-2: #93a0b3;
+  --accent: #3b6fd4;         /* 沉稳企业蓝 */
+  --accent-weak: #dbe5f6;
+  --ok: #2fa36b;
+  --warn: #d99114;
+  --danger: #d0453e;
+  /* 披露四级语义色（全站一致，这是产品语言） */
+  --lv-full: #2fa36b;
+  --lv-summary: #3b6fd4;
+  --lv-metadata: #d99114;
+  --lv-none: #d0453e;
+
+  /* 拟物光影对（风格核心，亮主题）：同色相高明暗差 */
+  --shadow-raised: 6px 6px 12px #c9cfda, -6px -6px 12px #ffffff;
+  --shadow-raised-sm: 3px 3px 6px #cdd3de, -3px -3px 6px #ffffff;
+  --shadow-inset: inset 4px 4px 8px #c9cfda, inset -4px -4px 8px #ffffff;
+
+  /* 字阶：11/12/13/14/16/20/28 七级封顶 */
+  --fs-11: 11px; --fs-12: 12px; --fs-13: 13px; --fs-14: 14px;
+  --fs-16: 16px; --fs-20: 20px; --fs-28: 28px;
+  /* 密度三档：表格行高 32/40/48，用户可切（默认档） */
+  --row-h: 40px;
+
+  /* 动效预算：抽屉/悬停 150-200ms ease-out；按钮按压 80ms */
+  --dur-ui: 180ms;
+  --dur-press: 80ms;
+
+  --radius-card: 16px;
+  --radius-ctrl: 10px;
+}
+
+[data-density="compact"] { --row-h: 32px; }
+[data-density="relaxed"] { --row-h: 48px; }
+
+/* 字体：本地 @fontsource（woff2 自包含，铁律 5 零外链） */
+:root {
+  --font-sans: "Inter", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}

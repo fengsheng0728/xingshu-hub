@@ -1,0 +1,172 @@
+/* 全局基础样式 + 拟物组件语言（§2.1.1 实现标准） */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #app { height: 100%; }
+
+body {
+  font-family: var(--font-sans);
+  font-size: var(--fs-14);
+  color: var(--text-0);
+  background: var(--bg-0);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数字/ID/hash 一律等宽 */
+.mono, td[data-mono], .kpi-value, code {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── 布局骨架（§1.3） ── */
+.shell { display: flex; flex-direction: column; height: 100%; }
+.shell-body { display: flex; flex: 1; min-height: 0; }
+.content {
+  flex: 1; min-width: 0; overflow-y: auto;
+  padding: 20px 24px 40px;
+}
+
+.page-title { font-size: var(--fs-20); font-weight: 600; margin-bottom: 4px; }
+.page-sub { font-size: var(--fs-13); color: var(--text-1); margin-bottom: 20px; }
+
+/* ── KPI 卡（★★★ 全拟物：凸起卡 + 内嵌表盘） ── */
+.kpi-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.kpi-card {
+  background: var(--bg-1);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-raised);
+  padding: 14px 16px;
+}
+.kpi-label {
+  font-size: var(--fs-12);
+  color: var(--text-1);
+  letter-spacing: 0.04em;
+  margin-bottom: 8px;
+}
+.kpi-value {
+  font-size: var(--fs-28);
+  font-weight: 600;
+  background: var(--bg-1);
+  border-radius: 10px;
+  box-shadow: var(--shadow-inset);   /* 嵌入表盘：数字像刻进面板 */
+  padding: 6px 12px;
+  display: inline-block;
+  min-width: 72px;
+  text-align: center;
+}
+.kpi-foot { font-size: var(--fs-12); color: var(--text-2); margin-top: 8px; }
+
+/* ── 面板（表格容器可拟物外框，表体行绝对扁平） ── */
+.panel {
+  background: var(--bg-1);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-raised);
+  padding: 16px;
+  margin-bottom: 20px;
+}
+.panel-title { font-size: var(--fs-13); font-weight: 600; color: var(--text-1); margin-bottom: 12px; }
+
+/* ── 表格是第一公民（扁平区）：数据区零拟物 ── */
+.table { width: 100%; border-collapse: collapse; font-size: var(--fs-13); }
+.table th {
+  text-align: left;
+  font-size: var(--fs-12);
+  color: var(--text-2);
+  font-weight: 500;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  position: sticky; top: 0;
+  background: var(--bg-1);
+}
+.table td {
+  height: var(--row-h);
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-0);
+}
+.table tbody tr { cursor: pointer; }
+.table tbody tr:hover td { background: var(--bg-2); }
+
+/* ── 健康指示灯（物理仪表灯隐喻） ── */
+.lamp {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.lamp.on-ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.lamp.on-warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.lamp.on-danger { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+.lamp.off { background: var(--bg-1); box-shadow: var(--shadow-inset); }  /* 灭=凹坑 */
+
+/* ── 状态徽标：dot + 文字（不纯用色块，照顾色弱） ── */
+.badge { display: inline-flex; align-items: center; font-size: var(--fs-12); color: var(--text-1); }
+
+/* ── 按钮（★★ 轻拟物：凸起 + 按压凹陷） ── */
+.btn {
+  font-family: var(--font-sans);
+  font-size: var(--fs-13);
+  color: var(--text-0);
+  background: var(--bg-1);
+  border: none;
+  border-radius: var(--radius-ctrl);
+  box-shadow: var(--shadow-raised-sm);
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: box-shadow var(--dur-press) ease-out;
+}
+.btn:active { box-shadow: var(--shadow-inset); }          /* 按下去 */
+.btn:disabled {                                            /* 坏掉的按钮按不动 */
+  box-shadow: none;
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:active { box-shadow: var(--shadow-inset); }
+
+/* ── 披露四级语义色工具类 ── */
+.lv-full { color: var(--lv-full); }
+.lv-summary { color: var(--lv-summary); }
+.lv-metadata { color: var(--lv-metadata); }
+.lv-none { color: var(--lv-none); }
+.dot-lv-full { background: var(--lv-full); box-shadow: 0 0 6px var(--lv-full); }
+.dot-lv-summary { background: var(--lv-summary); box-shadow: 0 0 6px var(--lv-summary); }
+.dot-lv-metadata { background: var(--lv-metadata); box-shadow: 0 0 6px var(--lv-metadata); }
+.dot-lv-none { background: var(--lv-none); box-shadow: 0 0 6px var(--lv-none); }
+
+/* ── 空态三件套 ── */
+.empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-1);
+}
+.empty .empty-title { font-size: var(--fs-14); margin-bottom: 6px; }
+.empty .empty-desc { font-size: var(--fs-12); color: var(--text-2); margin-bottom: 16px; }
+
+/* ── 告警滚动条 ── */
+.alert-strip {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--bg-1);
+  border-radius: var(--radius-ctrl);
+  box-shadow: var(--shadow-raised-sm);
+  padding: 10px 14px;
+  font-size: var(--fs-13);
+  margin-bottom: 20px;
+}
+.alert-strip.warn { color: var(--warn); }
+.alert-strip.danger { color: var(--danger); }
+
+/* 堆叠条（披露四级分布，纯 CSS 无动画——数据即现） */
+.stack-bar { display: flex; height: 18px; border-radius: 9px; overflow: hidden; box-shadow: var(--shadow-inset); }
+.stack-bar > div { height: 100%; }
+.stack-legend { display: flex; gap: 16px; font-size: var(--fs-12); color: var(--text-1); margin-top: 8px; flex-wrap: wrap; }
+
+/* 页面切换无动画；抽屉/悬停 150-200ms */
+.fade-enter-active, .fade-leave-active { transition: opacity var(--dur-ui) ease-out; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }

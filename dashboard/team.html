@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.png">
+<title>团队仪表盘 · 星枢</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{height:100vh;display:flex;flex-direction:column}
+  header{background:rgba(255,255,255,0.35);border-bottom:1px solid #d4cec0;padding:10px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+  header h1{font-size:16px;font-weight:600}
+  header input{background:rgba(255,255,255,0.3);border:1px solid #d4cec0;border-radius:2px;color:#2c2c2c;padding:5px 10px;font-size:12px}
+  header input:focus{outline:none;border-color:#1f6feb}
+  .key-input{width:320px}
+  .btn{background:transparent;border:1px solid #d4cec0;border-radius:2px;color:#2c2c2c;padding:5px 12px;cursor:pointer;font-size:12px}
+  .btn:hover{background:#c4a77d}
+  .btn-primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+  .btn-primary:hover{background:#388bfd}
+  .main{flex:1;overflow-y:auto;padding:16px;display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:14px;align-content:start}
+  .card{background:rgba(255,255,255,0.35);border:1px solid #d4cec0;border-radius:8px;overflow:hidden}
+  .card h2{font-size:13px;font-weight:600;padding:10px 14px;border-bottom:1px solid #d4cec0;background:rgba(255,255,255,0.35);display:flex;align-items:center;gap:8px}
+  .card .body{padding:10px 14px}
+  .row{display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid rgba(255,255,255,0.35)}
+  .row:last-child{border-bottom:none}
+  .row .name{flex:1;font-size:12px;color:#e6edf3;word-break:break-all}
+  .row .sub{font-size:10px;color:#8a8278}
+  .dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+  .dot.on{background:#3fb950}
+  .dot.off{background:#f85149}
+  .tag{font-size:10px;background:#1f6feb33;color:#6b8e6b;padding:1px 8px;border-radius:10px}
+  .tag.gray{background:#d4cec0;color:#8a8278}
+  .num{font-size:18px;font-weight:700;color:#e6edf3}
+  .num-sm{font-size:12px;font-weight:600;color:#e6edf3}
+  .bar{height:6px;border-radius:3px;background:#d4cec0;overflow:hidden;margin-top:4px}
+  .bar > i{display:block;height:100%;background:#1f6feb}
+  .bar > i.green{background:#3fb950}
+  .bar > i.orange{background:#d29922}
+  .stat-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+  .stat{text-align:center;padding:8px 0}
+  .stat .lbl{font-size:10px;color:#8a8278;margin-top:2px}
+  .empty{color:#8a8278;font-size:12px;padding:12px;text-align:center}
+  .toast{position:fixed;bottom:20px;right:20px;background:#1f6feb;color:#fff;padding:8px 16px;border-radius:6px;font-size:12px;display:none}
+  .toast.err{background:#da3633}
+</style>
+<script src="/static/auth.js"></script>
+<link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+<header>
+  <h1>👥 团队仪表盘</h1>
+  <input class="key-input" id="api-key" type="password" placeholder="API Key（agents 表 api_key，本地保存）">
+  <button class="btn" id="btn-save-key">保存 Key</button>
+  <button class="btn btn-primary" id="btn-refresh">↻ 刷新</button>
+  <span id="status" style="font-size:11px;color:#8a8278"></span>
+</header>
+<div class="main" id="main">
+  <div class="empty" id="placeholder">加载中…</div>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+(function () {
+  var KEY = 'xingshu_dash_token';
+  var apiKey = localStorage.getItem(KEY) || '';
+  if (apiKey) document.getElementById('api-key').value = apiKey;
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isErr) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isErr ? ' err' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 2600);
+  }
+  function setStatus(s) { document.getElementById('status').textContent = s; }
+
+  function card(title) {
+    var c = document.createElement('div');
+    c.className = 'card';
+    var h = document.createElement('h2');
+    h.innerHTML = title;
+    var b = document.createElement('div');
+    b.className = 'body';
+    c.appendChild(h); c.appendChild(b);
+    document.getElementById('main').appendChild(c);
+    return b;
+  }
+
+  function renderAgentCard(agents) {
+    var b = card('🤖 Agent 在线状态 <span class="tag">' + agents.length + ' 个</span>');
+    if (!agents.length) { b.innerHTML = '<div class="empty">无 Agent</div>'; return; }
+    agents.forEach(function (a) {
+      var r = document.createElement('div');
+      r.className = 'row';
+      r.innerHTML =
+        '<span class="dot ' + (a.online ? 'on' : 'off') + '"></span>' +
+        '<span class="name">' + esc(a.agent_name || a.agent_id) + '<div class="sub">' + esc(a.agent_id) +
+        ' · ' + esc(a.role) + (a.department ? ' · ' + esc(a.department) : '') +
+        (a.last_heartbeat ? ' · 心跳 ' + esc(a.last_heartbeat) : '') + '</div></span>' +
+        '<span class="tag ' + (a.online ? '' : 'gray') + '">' + (a.online ? '在线' : '离线') + '</span>';
+      b.appendChild(r);
+    });
+  }
+
+  function renderTaskCard(tasks) {
+    var bs = tasks.by_status || {}, ba = tasks.by_agent || {};
+    var total = 0, key;
+    for (key in bs) total += bs[key];
+    var b = card('📋 任务分布 <span class="tag">' + total + ' 个</span>');
+    var grid = document.createElement('div');
+    grid.className = 'stat-grid';
+    var order = [['pending', '待处理'], ['assigned', '已分配'], ['in_progress', '进行中'], ['completed', '已完成'], ['cancelled', '已取消'], ['failed', '失败']];
+    order.forEach(function (pair) {
+      var s = document.createElement('div');
+      s.className = 'stat';
+      s.innerHTML = '<div class="num">' + (bs[pair[0]] || 0) + '</div><div class="lbl">' + pair[1] + '</div>';
+      grid.appendChild(s);
+    });
+    b.appendChild(grid);
+    var agents = Object.keys(ba);
+    if (agents.length) {
+      var h4 = document.createElement('div');
+      h4.style.cssText = 'font-size:11px;color:#8a8278;margin:10px 0 4px';
+      h4.textContent = '按 Agent 分布';
+      b.appendChild(h4);
+      agents.forEach(function (aid) {
+        var d = ba[aid], cnt = 0, k2;
+        for (k2 in d) cnt += d[k2];
+        var r = document.createElement('div');
+        r.className = 'row';
+        r.innerHTML = '<span class="name">' + esc(aid) + '</span><span class="num-sm">' + cnt + '</span>';
+        b.appendChild(r);
+      });
+    }
+  }
+
+  function renderMemoryCard(mem) {
+    var bk = mem.by_kind || {};
+    var b = card('🧠 记忆池 <span class="tag">' + mem.total + ' 条</span>');
+    if (!mem.total) { b.innerHTML = '<div class="empty">暂无记忆</div>'; return; }
+    var max = 1, k;
+    for (k in bk) if (bk[k] > max) max = bk[k];
+    var keys = Object.keys(bk).sort(function (x, y) { return bk[y] - bk[x]; });
+    keys.forEach(function (k2) {
+      var r = document.createElement('div');
+      r.style.cssText = 'margin:6px 0';
+      r.innerHTML = '<div style="display:flex;justify-content:space-between;font-size:11px"><span>' + esc(k2) +
+        '</span><span class="num-sm">' + bk[k2] + '</span></div>' +
+        '<div class="bar"><i style="width:' + Math.round(bk[k2] / max * 100) + '%"></i></div>';
+      b.appendChild(r);
+    });
+  }
+
+  function renderAutoCard(auto) {
+    var bls = auto.by_last_status || {};
+    var b = card('⚙️ 自动化 <span class="tag">' + auto.total + ' 个</span>');
+    if (!auto.total) { b.innerHTML = '<div class="empty">暂无自动化任务</div>'; return; }
+    var grid = document.createElement('div');
+    grid.className = 'stat-grid';
+    [['total', '总数', auto.total], ['enabled', '启用', auto.enabled], ['disabled', '停用', auto.disabled]].forEach(function (x) {
+      var s = document.createElement('div');
+      s.className = 'stat';
+      s.innerHTML = '<div class="num">' + x[2] + '</div><div class="lbl">' + x[1] + '</div>';
+      grid.appendChild(s);
+    });
+    b.appendChild(grid);
+    var ls = Object.keys(bls);
+    if (ls.length) {
+      ls.forEach(function (st) {
+        var r = document.createElement('div');
+        r.className = 'row';
+        r.innerHTML = '<span class="name">最近状态: ' + esc(st) + '</span><span class="num-sm">' + bls[st] + '</span>';
+        b.appendChild(r);
+      });
+    }
+  }
+
+  function render(data) {
+    var main = document.getElementById('main');
+    main.innerHTML = '';
+    renderAgentCard(data.agents || []);
+    renderTaskCard(data.tasks || {});
+    renderMemoryCard(data.memory || {});
+    renderAutoCard(data.automation || {});
+    setStatus('更新于 ' + new Date().toLocaleTimeString());
+  }
+
+  function load() {
+    apiKey = localStorage.getItem(KEY) || document.getElementById('api-key').value.trim();
+    if (!apiKey) {
+      document.getElementById('placeholder').textContent = '请先输入 API Key 并保存';
+      return;
+    }
+    setStatus('加载中…');
+    fetch('/api/v1/team/stats', { headers: { 'Authorization': 'Bearer ' + apiKey } })
+      .then(function (r) {
+        if (r.status === 401) { throw new Error('鉴权失败，请检查 API Key'); }
+        return r.json();
+      })
+      .then(function (d) {
+        if (d && d.status === 'ok') render(d);
+        else throw new Error(d && d.detail ? d.detail : '数据异常');
+      })
+      .catch(function (e) { setStatus(''); toast(e.message || '加载失败', true); });
+  }
+
+  document.getElementById('btn-save-key').addEventListener('click', function () {
+    localStorage.setItem(KEY, document.getElementById('api-key').value.trim());
+    toast('Key 已保存');
+    load();
+  });
+  document.getElementById('btn-refresh').addEventListener('click', load);
+  load();
+})();
+</script>
+</body>
+</html>

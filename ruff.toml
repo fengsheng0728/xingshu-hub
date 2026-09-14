@@ -1,0 +1,20 @@
+# 星枢 Sync Hub ruff 配置（T2-6 异常底线门禁, 2026-09-09）
+# select 范围: E722 裸 except 零容忍; F403 于 D-7/3-2a 加入：全仓通配 import 已清零，防复发;
+# F/E 基础集存量过大(1163 处)未启用, 存量登记台账 CD-029, 随重构逐步放宽。
+
+[lint]
+select = ["E722", "F403"]
+exclude = [
+    "examples/arch-site/**",
+    "node_modules/**",
+    "dashboard/**",
+    "examples/showcase/**",
+    "docs/**",
+    "audit/**",
+    "build/**",
+    "dist/**",
+    "*.pyc",
+    "fix_*.py",
+    "e2e_settings.py",
+    "e2e_integrations.py",
+]

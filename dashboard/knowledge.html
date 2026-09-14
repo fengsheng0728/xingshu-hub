@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" href="favicon.png">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知识图谱 · 星枢</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  overflow:hidden;height:100vh;
+  display:flex;flex-direction:column;
+}
+.topbar{
+  display:flex;align-items:center;padding:10px 16px;gap:12px;
+  background:rgba(255,255,255,0.35);border-bottom:1px solid #d4cec0;flex-shrink:0;
+}
+.topbar h1{font-size:15px;white-space:nowrap}
+.topbar h1 span{color:#6b8e6b}
+.topbar input{
+  flex:1;max-width:300px;background:rgba(255,255,255,0.3);border:1px solid #d4cec0;
+  border-radius:2px;padding:6px 12px;color:#2c2c2c;font-size:13px;outline:none
+}
+.topbar input:focus{border-color:#6b8e6b}
+.btn{
+  background:#d4cec0;border:1px solid #c4a77d;border-radius:6px;
+  color:#2c2c2c;padding:6px 14px;font-size:12px;cursor:pointer;transition:all .15s
+}
+.btn:hover{background:#c4a77d}
+.btn-primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+.btn-primary:hover{background:#388bfd}
+.btn-danger:hover{background:#da3633;border-color:#da3633;color:#fff}
+.graph-wrap{flex:1;position:relative}
+#graph{width:100%;height:100%}
+svg text{fill:#8a8278;font-size:11px;pointer-events:none;user-select:none}
+.edge{stroke:#c4a77d;stroke-width:1}
+.edge:hover{stroke:#6b8e6b;stroke-width:2}
+.node{cursor:pointer;transition:opacity .2s}
+.node:hover{opacity:1!important}
+.node.faded{opacity:.15}
+
+.detail-panel{
+  position:absolute;top:12px;right:12px;width:320px;max-height:80vh;
+  background:rgba(255,255,255,0.35);border:1px solid #c4a77d;border-radius:8px;padding:16px;
+  overflow-y:auto;display:none;z-index:10
+}
+.detail-panel h3{font-size:14px;margin-bottom:8px;color:#6b8e6b}
+.detail-panel .meta{font-size:11px;color:#8a8278;margin-bottom:8px}
+.detail-panel .content{font-size:13px;line-height:1.6;white-space:pre-wrap;margin-bottom:12px}
+.detail-panel .tags{margin-bottom:12px}
+.tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;margin:2px 4px 2px 0}
+.category-colors{
+  product:rgba(31,111,235,.2);policy:rgba(163,113,247,.2);
+  faq:rgba(63,185,80,.2);process:rgba(219,109,40,.2);general:rgba(139,148,158,.2)
+}
+.tag-product{background:rgba(31,111,235,.2);color:#6b8e6b}
+.tag-policy{background:rgba(163,113,247,.2);color:#bc8cff}
+.tag-faq{background:rgba(63,185,80,.2);color:#56d364}
+.tag-process{background:rgba(219,109,40,.2);color:#f0883e}
+.tag-general{background:rgba(139,148,158,.2);color:#8a8278}
+
+.form-group{margin-bottom:10px}
+.form-group label{display:block;font-size:11px;color:#8a8278;margin-bottom:3px}
+.form-group input,.form-group textarea,.form-group select{
+  width:100%;background:rgba(255,255,255,0.3);border:1px solid #d4cec0;border-radius:6px;
+  padding:6px 10px;color:#2c2c2c;font-size:12px;outline:none;font-family:inherit
+}
+.form-group textarea{min-height:60px;resize:vertical}
+.form-group input:focus,.form-group textarea:focus{border-color:#6b8e6b}
+.link-suggest{
+  position:absolute;background:#d4cec0;border:1px solid #c4a77d;
+  border-radius:6px;max-height:150px;overflow-y:auto;z-index:20;display:none
+}
+.link-suggest div{
+  padding:6px 12px;font-size:12px;cursor:pointer
+}
+.link-suggest div:hover{background:#c4a77d}
+
+.empty-state{
+  position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  text-align:center;color:#c4a77d
+}
+.empty-state .icon{font-size:48px;margin-bottom:12px}
+.empty-state p{font-size:14px}
+</style>
+<script src="/static/auth.js"></script>
+<link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+<div class="topbar">
+  <h1>🧠 星枢<span>知识图谱</span></h1>
+  <input id="searchInput" placeholder="搜索知识条目...">
+  <button class="btn" onclick="resetGraph()">重置视图</button>
+  <button class="btn btn-primary" onclick="showAddForm()">＋ 新建</button>
+  <button class="btn" onclick="showMemoryImport()">📊 从记忆导入</button>
+  <a href="/" class="btn" style="text-decoration:none">← 控制台</a>
+</div>
+
+<div class="graph-wrap">
+  <svg id="graph"></svg>
+  <div class="empty-state" id="emptyState">
+    <div class="icon">🧠</div>
+    <p>知识图谱为空</p>
+    <p style="margin-top:8px;font-size:12px;line-height:1.8">
+      <b>三种方式添加知识：</b><br>
+      1. 点击「＋ 新建」手动录入<br>
+      2. 点击「📊 从记忆导入」从客服记录提取<br>
+      3. 新建时输入标题，点「🤖 AI 补全」自动生成内容
+    </p>
+  </div>
+
+  <div class="detail-panel" id="detailPanel"></div>
+</div>
+
+<script>
+const API = window.location.origin;
+// P0: 统一 token 注入 — 所有 fetch 自动携带 Authorization，401 弹输入门
+const __dashFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.headers = DashAuth.authHeaders(opts.headers || {});
+  return __dashFetch(url, opts).then(function (r) {
+    if (r.status === 401) DashAuth.showGate();
+    return r;
+  });
+};
+
+let graphData = {nodes:[], edges:[]};
+let simulation;
+let svg, g;
+let selectedNode = null;
+
+// =========== Colors by category ===========
+const catColors = {
+  product: '#6b8e6b', policy: '#bc8cff',
+  faq: '#56d364', process: '#f0883e', general: '#8a8278'
+};
+
+// =========== Load & render ===========
+async function loadGraph() {
+  try {
+    const r = await fetch(`${API}/api/v1/knowledge/graph/data`);
+    graphData = await r.json();
+    if (graphData.status === 'ok') renderGraph();
+  } catch(e) { console.error(e); }
+}
+
+function renderGraph() {
+  const el = document.getElementById('graph');
+  const W = el.clientWidth, H = el.clientHeight;
+
+  if (!graphData.nodes.length) {
+    document.getElementById('emptyState').style.display = 'block';
+    return;
+  }
+  document.getElementById('emptyState').style.display = 'none';
+
+  // Clear
+  el.innerHTML = '';
+  svg = d3.select('#graph')
+    .attr('viewBox', [0, 0, W, H]);
+
+  g = svg.append('g');
+
+  // Zoom
+  svg.call(d3.zoom().scaleExtent([0.2, 4]).on('zoom', (e) => {
+    g.attr('transform', e.transform);
+  }));
+
+  // Edges
+  const edgeMap = new Map();
+  graphData.edges.forEach(e => {
+    const key = [e.source, e.target].sort().join('::');
+    if (!edgeMap.has(key)) edgeMap.set(key, e);
+  });
+  const uniqueEdges = [...edgeMap.values()];
+
+  g.append('g').attr('class', 'edges').selectAll('line')
+    .data(uniqueEdges)
+    .join('line')
+    .attr('class', 'edge');
+
+  // Node size by importance
+  const rScale = d3.scaleLinear()
+    .domain([0, d3.max(graphData.nodes, d => d.importance) || 1])
+    .range([6, 22]);
+
+  // Nodes
+  const nodeG = g.append('g').attr('class', 'nodes').selectAll('g')
+    .data(graphData.nodes)
+    .join('g')
+    .attr('class', 'node')
+    .call(d3.drag()
+      .on('start', (e, d) => { if (!e.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag', (e, d) => { d.fx = e.x; d.fy = e.y; })
+      .on('end', (e, d) => { if (!e.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; })
+    );
+
+  nodeG.append('circle')
+    .attr('r', d => rScale(d.importance))
+    .attr('fill', d => catColors[d.category] || '#8a8278')
+    .attr('stroke', '#d4cec0')
+    .attr('stroke-width', 1.5);
+
+  nodeG.append('text')
+    .text(d => d.title.substring(0, 12))
+    .attr('dy', d => rScale(d.importance) + 14)
+    .attr('text-anchor', 'middle');
+
+  nodeG.on('click', (e, d) => {
+    e.stopPropagation();
+    showDetail(d.id);
+  });
+
+  // Click background to deselect
+  svg.on('click', () => {
+    selectedNode = null;
+    highlightNodes([]);
+    document.getElementById('detailPanel').style.display = 'none';
+  });
+
+  // Simulation
+  simulation = d3.forceSimulation(graphData.nodes)
+    .force('link', d3.forceLink(uniqueEdges).id(d => d.id).distance(100))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    .force('collision', d3.forceCollide().radius(d => rScale(d.importance) + 8))
+    .on('tick', () => {
+      g.selectAll('.edge')
+        .attr('x1', d => d.source.x)
+        .attr('y1', d => d.source.y)
+        .attr('x2', d => d.target.x)
+        .attr('y2', d => d.target.y);
+      nodeG.attr('transform', d => `translate(${d.x},${d.y})`);
+    });
+}
+
+function highlightNodes(linkedIds) {
+  d3.selectAll('.node').classed('faded', d =>
+    linkedIds.length > 0 && d.id !== selectedNode && !linkedIds.includes(d.id)
+  );
+  d3.selectAll('.edge').classed('faded', d =>
+    linkedIds.length > 0 && d.source.id !== selectedNode && d.target.id !== selectedNode
+  );
+}
+
+function resetGraph() {
+  document.getElementById('searchInput').value = '';
+  selectedNode = null;
+  highlightNodes([]);
+  document.getElementById('detailPanel').style.display = 'none';
+  simulation?.alpha(0.3).restart();
+}
+
+// =========== Detail panel ===========
+async function showDetail(entryId) {
+  selectedNode = entryId;
+
+  // Highlight connected
+  const linked = new Set();
+  graphData.edges.forEach(e => {
+    if (e.source === entryId || e.source?.id === entryId) linked.add(e.target?.id || e.target);
+    if (e.target === entryId || e.target?.id === entryId) linked.add(e.source?.id || e.source);
+  });
+  highlightNodes([...linked]);
+
+  // Fetch full entry
+  const r = await fetch(`${API}/api/v1/knowledge/${entryId}`);
+  const d = await r.json();
+  if (d.status !== 'ok') return;
+
+  const e = d.entry;
+  const panel = document.getElementById('detailPanel');
+  panel.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:start">
+      <h3>${esc(e.title)}</h3>
+      <div>
+        <button class="btn" onclick="showEditForm('${e.entry_id}')" style="font-size:11px;padding:3px 8px">编辑</button>
+        <button class="btn btn-danger" onclick="deleteEntry('${e.entry_id}')" style="font-size:11px;padding:3px 8px;margin-left:4px">删除</button>
+      </div>
+    </div>
+    <div class="meta">${e.category} · 重要度 ${e.importance} · ${e.created_at?.slice(0,10) || ''}</div>
+    <div class="tags">${(e.tags||[]).map(t => `<span class="tag tag-${e.category}">${t}</span>`).join('')}</div>
+    <div class="content">${esc(e.content || '')}</div>
+    <div class="meta">链接: ${(e.links||[]).map(l => `<a href="javascript:showDetail('${l}')" style="color:#6b8e6b">${l.substring(0,8)}</a>`).join(', ') || '无'}</div>
+  `;
+  panel.style.display = 'block';
+}
+
+// =========== Add/Edit ===========
+async function showAddForm() {
+  // Fetch existing entries for link suggestions
+  const r = await fetch(`${API}/api/v1/knowledge`);
+  const data = await r.json();
+  const allEntries = data.entries || [];
+
+  const panel = document.getElementById('detailPanel');
+  panel.innerHTML = `
+    <h3>新建知识条目</h3>
+    <div class="form-group"><label>标题</label>
+      <div style="display:flex;gap:8px">
+        <input id="fTitle" style="flex:1">
+        <button class="btn btn-primary" onclick="autoComplete()" style="font-size:11px;padding:6px 10px;white-space:nowrap;flex-shrink:0">🤖 AI 补全</button>
+      </div>
+    </div>
+    <div class="form-group"><label>内容</label><textarea id="fContent"></textarea></div>
+    <div class="form-group"><label>分类</label>
+      <select id="fCategory">
+        <option value="general">通用</option><option value="product">产品</option>
+        <option value="policy">政策</option><option value="faq">FAQ</option>
+        <option value="process">流程</option>
+      </select>
+    </div>
+    <div class="form-group"><label>标签（逗号分隔）</label><input id="fTags" placeholder="色差,橱柜,售后"></div>
+    <div class="form-group"><label>重要度 (0-1)</label><input id="fImportance" type="number" min="0" max="1" step="0.1" value="1"></div>
+    <div class="form-group" style="position:relative">
+      <label>链接到（输入标题搜索）</label>
+      <input id="fLinkSearch" placeholder="搜索已有条目..." oninput="suggestLinks()" autocomplete="off">
+      <div class="link-suggest" id="linkSuggest"></div>
+      <div id="selectedLinks" style="margin-top:4px;font-size:11px;color:#8a8278"></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-primary" onclick="saveEntry()">保存</button>
+      <button class="btn" onclick="document.getElementById('detailPanel').style.display='none'">取消</button>
+    </div>
+  `;
+  panel.style.display = 'block';
+  window._allEntries = allEntries;
+  window._selectedLinkIds = [];
+  document.getElementById('fTitle').focus();
+}
+
+async function showEditForm(entryId) {
+  const r = await fetch(`${API}/api/v1/knowledge/${entryId}`);
+  const d = await r.json();
+  if (d.status !== 'ok') return;
+  const e = d.entry;
+
+  const allR = await fetch(`${API}/api/v1/knowledge`);
+  const allData = await allR.json();
+  window._allEntries = allData.entries || [];
+  window._selectedLinkIds = e.links || [];
+
+  const panel = document.getElementById('detailPanel');
+  panel.innerHTML = `
+    <h3>编辑: ${esc(e.title)}</h3>
+    <div class="form-group"><label>标题</label><input id="fTitle" value="${esc(e.title)}"></div>
+    <div class="form-group"><label>内容</label><textarea id="fContent">${esc(e.content || '')}</textarea></div>
+    <div class="form-group"><label>分类</label>
+      <select id="fCategory">${['general','product','policy','faq','process'].map(c =>
+        `<option value="${c}" ${e.category===c?'selected':''}>${c}</option>`
+      ).join('')}</select>
+    </div>
+    <div class="form-group"><label>标签（逗号分隔）</label><input id="fTags" value="${(e.tags||[]).join(',')}"></div>
+    <div class="form-group"><label>重要度</label><input id="fImportance" type="number" min="0" max="1" step="0.1" value="${e.importance}"></div>
+    <div class="form-group" style="position:relative">
+      <label>链接到</label>
+      <input id="fLinkSearch" placeholder="搜索已有条目..." oninput="suggestLinks()" autocomplete="off">
+      <div class="link-suggest" id="linkSuggest"></div>
+      <div id="selectedLinks" style="margin-top:4px;font-size:11px;color:#8a8278">${renderSelectedLinks()}</div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="btn btn-primary" onclick="saveEntry('${entryId}')">保存</button>
+      <button class="btn" onclick="showDetail('${entryId}')">取消</button>
+    </div>
+  `;
+  panel.style.display = 'block';
+}
+
+function renderSelectedLinks() {
+  return (window._selectedLinkIds || []).map(id => {
+    const e = (window._allEntries || []).find(x => x.entry_id === id);
+    return `<span style="display:inline-block;padding:1px 6px;margin:2px;background:#d4cec0;border-radius:4px;cursor:pointer" onclick="removeLink('${id}')" title="移除">${e?.title || id} ✕</span>`;
+  }).join('');
+}
+
+async function autoComplete() {
+  const title = document.getElementById('fTitle').value.trim();
+  if (!title) return alert('请先输入标题');
+  const btn = event.target;
+  btn.textContent = '⏳ 生成中...'; btn.disabled = true;
+  try {
+    const r = await fetch(`${API}/api/v1/knowledge/auto-complete`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title})
+    });
+    const d = await r.json();
+    if (d.status === 'ok' && d.entry) {
+      const e = d.entry;
+      document.getElementById('fContent').value = e.content || '';
+      document.getElementById('fCategory').value = e.category || 'general';
+      document.getElementById('fTags').value = (e.tags || []).join(',');
+      if (e.importance) document.getElementById('fImportance').value = e.importance;
+    } else {
+      alert('AI 补全失败: ' + (d.error || '未知错误'));
+    }
+  } catch(e) { alert('网络错误: ' + e.message); }
+  btn.textContent = '🤖 AI 补全'; btn.disabled = false;
+}
+
+function suggestLinks() {
+  const q = (document.getElementById('fLinkSearch')?.value || '').toLowerCase();
+  const suggest = document.getElementById('linkSuggest');
+  if (!q || q.length < 1) { suggest.style.display = 'none'; return; }
+
+  const matches = (window._allEntries || []).filter(e =>
+    e.title.toLowerCase().includes(q) && !(window._selectedLinkIds || []).includes(e.entry_id)
+  ).slice(0, 8);
+
+  if (!matches.length) { suggest.style.display = 'none'; return; }
+
+  suggest.innerHTML = matches.map(e =>
+    `<div onclick="addLink('${e.entry_id}','${esc(e.title)}')">${esc(e.title)} <span style="color:#484f58">${e.category}</span></div>`
+  ).join('');
+  suggest.style.display = 'block';
+}
+
+function addLink(id, title) {
+  if (!window._selectedLinkIds) window._selectedLinkIds = [];
+  if (!window._selectedLinkIds.includes(id)) window._selectedLinkIds.push(id);
+  document.getElementById('fLinkSearch').value = '';
+  document.getElementById('linkSuggest').style.display = 'none';
+  document.getElementById('selectedLinks').innerHTML = renderSelectedLinks();
+}
+
+function removeLink(id) {
+  window._selectedLinkIds = (window._selectedLinkIds || []).filter(x => x !== id);
+  document.getElementById('selectedLinks').innerHTML = renderSelectedLinks();
+}
+
+async function saveEntry(existingId) {
+  const title = document.getElementById('fTitle').value.trim();
+  if (!title) return alert('请输入标题');
+
+  const body = {
+    entry_id: existingId || null,
+    title: title,
+    content: document.getElementById('fContent').value,
+    tags: document.getElementById('fTags').value.split(',').map(s => s.trim()).filter(Boolean),
+    links: window._selectedLinkIds || [],
+    category: document.getElementById('fCategory').value,
+    importance: parseFloat(document.getElementById('fImportance').value) || 1,
+  };
+
+  const r = await fetch(`${API}/api/v1/knowledge`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body),
+  });
+  const d = await r.json();
+  if (d.status === 'ok') {
+    document.getElementById('detailPanel').style.display = 'none';
+    loadGraph();
+  } else {
+    alert('保存失败: ' + JSON.stringify(d));
+  }
+}
+
+async function deleteEntry(entryId) {
+  if (!confirm('确定删除？')) return;
+  await fetch(`${API}/api/v1/knowledge/${entryId}`, { method: 'DELETE' });
+  document.getElementById('detailPanel').style.display = 'none';
+  selectedNode = null;
+  loadGraph();
+}
+
+// =========== Search ===========
+document.getElementById('searchInput').addEventListener('input', function() {
+  const q = this.value.toLowerCase();
+  if (!q) { highlightNodes([]); return; }
+  const matches = graphData.nodes.filter(n => n.title.toLowerCase().includes(q));
+  const matchIds = new Set(matches.map(n => n.id));
+  d3.selectAll('.node').classed('faded', d => !matchIds.has(d.id));
+});
+
+// =========== Helpers ===========
+function esc(s) {
+  if (!s) return '';
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+async function showMemoryImport() {
+  const panel = document.getElementById('detailPanel');
+  panel.innerHTML = '<div style="text-align:center;padding:20px;color:#8a8278">⏳ 分析记忆池...</div>';
+  panel.style.display = 'block';
+
+  try {
+    const r = await fetch(`${API}/api/v1/knowledge/from-memories?limit=15`);
+    const d = await r.json();
+    if (d.status !== 'ok') { panel.innerHTML = '<p>获取失败</p>'; return; }
+
+    panel.innerHTML = `
+      <h3>📊 从记忆池提取知识</h3>
+      <p style="font-size:11px;color:#8a8278;margin-bottom:12px">基于高频标签自动建议，勾选后批量导入</p>
+      <div id="importList">${d.suggestions.map((s,i) => `
+        <div style="display:flex;align-items:start;gap:10px;padding:10px 0;border-bottom:1px solid #d4cec0">
+          <input type="checkbox" id="imp${i}" checked style="margin-top:3px;flex-shrink:0">
+          <div style="flex:1">
+            <div style="font-size:13px;font-weight:600">${esc(s.title)}</div>
+            <div style="font-size:11px;color:#8a8278;margin-top:2px">${esc(s.suggested_content)}</div>
+            <div style="font-size:10px;color:#484f58;margin-top:4px">
+              <span class="tag tag-${s.suggested_category}">${s.suggested_category}</span>
+              ${(s.suggested_tags||[]).map(t=>`<span class="tag tag-general">${t}</span>`).join('')}
+              · 出现 ${s.frequency} 次 · 来源: ${s.source_agent}
+            </div>
+          </div>
+        </div>
+      `).join('')}</div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn btn-primary" onclick="batchImport()">📥 批量导入选中</button>
+        <button class="btn" onclick="document.getElementById('detailPanel').style.display='none'">取消</button>
+      </div>
+    `;
+  } catch(e) { panel.innerHTML = '<p>网络错误</p>'; }
+}
+
+async function batchImport() {
+  const checks = document.querySelectorAll('#importList input[type=checkbox]');
+  let imported = 0, failed = 0;
+  const items = [];
+  checks.forEach((cb, i) => { if (cb.checked) items.push(i); });
+
+  for (const i of items) {
+    try {
+      const s = (await (await fetch(`${API}/api/v1/knowledge/from-memories?limit=15`)).json()).suggestions[i];
+      const r = await fetch(`${API}/api/v1/knowledge`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          title: s.title, content: s.suggested_content,
+          tags: s.suggested_tags, category: s.suggested_category,
+          importance: s.importance, links: []
+        })
+      });
+      if ((await r.json()).status === 'ok') imported++; else failed++;
+    } catch(e) { failed++; }
+  }
+  document.getElementById('detailPanel').style.display = 'none';
+  loadGraph();
+  alert(`导入完成: ${imported} 成功, ${failed} 失败`);
+}
+
+// Init
+loadGraph();
+</script>
+</body>
+</html>

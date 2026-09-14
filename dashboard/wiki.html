@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="favicon.png">
+<title>Wiki · 星枢</title>
+<link rel="stylesheet" href="/static/lib/easymde.min.css">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{height:100vh;display:flex;flex-direction:column}
+  header{background:rgba(255,255,255,0.35);border-bottom:1px solid #d4cec0;padding:10px 16px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+  header h1{font-size:16px;font-weight:600}
+  header input{background:rgba(255,255,255,0.3);border:1px solid #d4cec0;border-radius:6px;color:#2c2c2c;padding:5px 10px;font-size:12px}
+  header input:focus{outline:none;border-color:#1f6feb}
+  .key-input{width:320px}
+  .btn{background:transparent;border:1px solid #d4cec0;border-radius:2px;color:#2c2c2c;padding:5px 12px;cursor:pointer;font-size:12px}
+  .btn:hover{background:#c4a77d}
+  .btn-primary{background:#1f6feb;border-color:#1f6feb;color:#fff}
+  .btn-primary:hover{background:#388bfd}
+  .btn-danger:hover{background:#da3633;border-color:#da3633;color:#fff}
+  .btn-success:hover{background:#238636;border-color:#238636;color:#fff}
+  .layout{flex:1;display:flex;overflow:hidden}
+  .panel{background:rgba(255,255,255,0.35);border-right:1px solid #d4cec0;width:340px;flex-shrink:0;display:flex;flex-direction:column;overflow:hidden}
+  .panel h2{font-size:13px;font-weight:600;padding:10px 14px;border-bottom:1px solid #d4cec0;background:rgba(255,255,255,0.35)}
+  .panel-body{flex:1;overflow-y:auto;padding:8px}
+  .main{flex:1;overflow-y:auto;padding:16px;background:rgba(247,243,233,0.4)}
+  .search-row{display:flex;gap:8px;padding:8px 14px;border-bottom:1px solid #d4cec0}
+  .search-row input{flex:1;background:rgba(255,255,255,0.3);border:1px solid #d4cec0;border-radius:6px;color:#2c2c2c;padding:5px 10px;font-size:12px}
+  .item{padding:8px 10px;border:1px solid #d4cec0;border-radius:6px;margin-bottom:6px;cursor:pointer;background:rgba(247,243,233,0.4)}
+  .item:hover{border-color:#c4a77d}
+  .item .t{font-size:13px;font-weight:500;color:#e6edf3}
+  .item .m{font-size:11px;color:#8a8278;margin-top:3px}
+  .item .snip{font-size:11px;color:#8a8278;margin-top:4px;white-space:pre-wrap;word-break:break-all}
+  .item.active{border-color:#1f6feb}
+  .inbox-item{display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid #d4cec0;border-radius:6px;margin-bottom:6px;background:rgba(247,243,233,0.4)}
+  .inbox-item .t{flex:1;font-size:12px;color:#e6edf3;word-break:break-all}
+  .inbox-item .src{font-size:10px;color:#8a8278}
+  .inbox-item .btns{display:flex;gap:4px}
+  .badge{font-size:10px;background:#1f6feb33;color:#6b8e6b;padding:1px 8px;border-radius:10px}
+  .empty{color:#8a8278;font-size:12px;padding:16px;text-align:center}
+  #detail{max-width:900px}
+  #detail h3{font-size:18px;margin-bottom:8px;color:#e6edf3}
+  #detail pre{background:rgba(255,255,255,0.35);border:1px solid #d4cec0;border-radius:6px;padding:14px;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-all;color:#2c2c2c}
+  .detail-meta{font-size:11px;color:#8a8278;margin-bottom:12px}
+  .toast{position:fixed;bottom:20px;right:20px;background:#1f6feb;color:#fff;padding:8px 16px;border-radius:6px;font-size:12px;display:none}
+  .toast.err{background:#da3633}
+</style>
+<script src="/static/auth.js"></script>
+<link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+<header>
+  <h1>📚 Wiki 知识库</h1>
+  <input class="key-input" id="api-key" type="password" placeholder="API Key（agents 表 api_key，本地保存）">
+  <button class="btn" id="btn-save-key">保存 Key</button>
+  <span id="auth-status" style="font-size:11px;color:#8a8278"></span>
+  <div style="flex:1"></div>
+  <button class="btn" id="btn-sync" title="触发 wiki 同步">同步</button>
+  <button class="btn btn-primary" id="btn-new-page">＋ 新建页面</button>
+</header>
+<div class="layout">
+  <div class="panel">
+    <div class="search-row">
+      <input id="search-q" placeholder="搜索 wiki（hybrid）…">
+      <button class="btn" id="btn-search">搜索</button>
+    </div>
+    <h2>已发布 <span class="badge" id="pages-count">0</span></h2>
+    <div class="panel-body" id="pages-list"><div class="empty">加载中…</div></div>
+  </div>
+  <div class="panel" style="border-right:none">
+    <h2>收件箱待审查 <span class="badge" id="inbox-count">0</span></h2>
+    <div class="panel-body" id="inbox-list"><div class="empty">加载中…</div></div>
+  </div>
+  <div class="main">
+    <div id="detail"><div class="empty">选择左侧条目查看内容，或搜索。</div></div>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<div id="editor-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:100;align-items:center;justify-content:center">
+  <div style="background:rgba(255,255,255,0.35);border:1px solid #c4a77d;border-radius:10px;width:860px;max-width:92vw;max-height:88vh;display:flex;flex-direction:column">
+    <div style="padding:12px 16px;border-bottom:1px solid #d4cec0;display:flex;gap:8px;align-items:center">
+      <input id="edit-path" placeholder="页面路径（如 concepts/my-page.md）" style="flex:1;background:rgba(255,255,255,0.3);border:1px solid #d4cec0;border-radius:6px;color:#2c2c2c;padding:6px 10px;font-size:12px">
+      <button class="btn" onclick="closeEditor()">取消</button>
+      <button class="btn btn-primary" onclick="savePage()">保存</button>
+    </div>
+    <div style="padding:12px;overflow-y:auto;flex:1">
+      <textarea id="edit-content"></textarea>
+    </div>
+    <div id="edit-msg" style="padding:0 16px 10px;font-size:11px;color:#da3633"></div>
+  </div>
+</div>
+<script src="/static/lib/marked.min.js"></script>
+<script src="/static/lib/purify.min.js"></script>
+<script src="/static/lib/easymde.min.js"></script>
+<script>
+(function () {
+  var API = window.location.origin;
+// P0: 统一 token 注入 — 所有 fetch 自动携带 Authorization，401 弹输入门
+const __dashFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.headers = DashAuth.authHeaders(opts.headers || {});
+  return __dashFetch(url, opts).then(function (r) {
+    if (r.status === 401) DashAuth.showGate();
+    return r;
+  });
+};
+
+  var KEY = localStorage.getItem('wiki_api_key') || '';
+  var currentPath = '';
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  function toast(msg, isErr) {
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast' + (isErr ? ' err' : '');
+    t.style.display = 'block';
+    setTimeout(function () { t.style.display = 'none'; }, 2500);
+  }
+  function authHeaders() {
+    return KEY ? { 'Authorization': 'Bearer ' + KEY } : {};
+  }
+  function api(path, opts) {
+    opts = opts || {};
+    return fetch(API + path, Object.assign({}, opts, { headers: Object.assign(authHeaders(), opts.headers || {}) }))
+      .then(function (r) {
+        if (r.status === 401) throw new Error('401 未认证：请先填写并保存 API Key');
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      });
+  }
+
+  function renderPages(list) {
+    var el = document.getElementById('pages-list');
+    document.getElementById('pages-count').textContent = list.length;
+    if (!list.length) { el.innerHTML = '<div class="empty">暂无已发布页面</div>'; return; }
+    el.innerHTML = list.map(function (p) {
+      return '<div class="item' + (p.path === currentPath ? ' active' : '') + '" data-path="' + esc(p.path) + '">'
+        + '<div class="t">' + esc(p.title || p.path) + '</div>'
+        + '<div class="m">' + esc(p.path) + ' · ' + esc(p.type || '') + ' · ' + esc(p.updated || '') + '</div>'
+        + '<button class="btn" style="margin-top:6px;font-size:10px;padding:2px 8px" data-edit="' + esc(p.path) + '">✏️ 编辑</button>'
+        + '</div>';
+    }).join('');
+    el.querySelectorAll('.item[data-path]').forEach(function (it) {
+      it.addEventListener('click', function (e) {
+        if (e.target.getAttribute && e.target.getAttribute('data-edit')) return;
+        openPage(it.getAttribute('data-path'));
+      });
+    });
+    el.querySelectorAll('[data-edit]').forEach(function (b) {
+      b.addEventListener('click', function () { editPage(b.getAttribute('data-edit')); });
+    });
+  }
+
+  function renderInbox(list) {
+    var el = document.getElementById('inbox-list');
+    document.getElementById('inbox-count').textContent = list.length;
+    if (!list.length) { el.innerHTML = '<div class="empty">收件箱为空</div>'; return; }
+    el.innerHTML = list.map(function (it) {
+      return '<div class="inbox-item">'
+        + '<div><div class="t">' + esc(it.title) + '</div>'
+        + '<div class="src">' + esc(it.page_path) + ' · ' + esc(it.source || '') + ' · ' + esc(it.created_at || '') + '</div></div>'
+        + '<div class="btns">'
+        + '<button class="btn btn-success" data-id="' + it.id + '" data-act="approve">批准</button>'
+        + '<button class="btn btn-danger" data-id="' + it.id + '" data-act="reject">拒绝</button>'
+        + '</div></div>';
+    }).join('');
+    el.querySelectorAll('[data-act]').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var id = b.getAttribute('data-id');
+        var act = b.getAttribute('data-act');
+        review(id, act);
+      });
+    });
+  }
+
+  function loadPages() {
+    api('/api/v1/wiki/pages').then(function (d) {
+      renderPages(d.pages || []);
+      setAuthStatus(true);
+    }).catch(function (e) { setAuthStatus(false); toast(e.message, true); });
+  }
+
+  function loadInbox() {
+    api('/api/v1/wiki/inbox').then(function (d) {
+      renderInbox(d.inbox || []);
+    }).catch(function () {});
+  }
+
+  function openPage(path) {
+    currentPath = path;
+    api('/api/v1/wiki/page/' + encodeURIComponent(path)).then(function (d) {
+      var el = document.getElementById('detail');
+      var content = (d.content || d.page || '').toString();
+      el.innerHTML = '<h3>' + esc(d.title || path) + '</h3>'
+        + '<div class="detail-meta">' + esc(path) + '</div>'
+        + '<pre>' + esc(content) + '</pre>';
+      loadPages();
+    }).catch(function (e) {
+      toast(e.message, true);
+      var el = document.getElementById('detail');
+      el.innerHTML = '<div class="empty">读取失败：' + esc(e.message) + '</div>';
+    });
+  }
+
+  function review(id, act) {
+    api('/api/v1/wiki/inbox/' + id + '/' + act, { method: 'POST' }).then(function (d) {
+      toast(act === 'approve' ? '已批准并发布' : '已拒绝');
+      loadInbox();
+      loadPages();
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function doSearch() {
+    var q = document.getElementById('search-q').value.trim();
+    if (!q) { loadPages(); return; }
+    api('/api/v1/wiki/search/hybrid?q=' + encodeURIComponent(q)).then(function (d) {
+      var list = (d.results || []).map(function (r) {
+        return { path: r.path, title: r.title, type: r.type, updated: '', snippet: r.snippet };
+      });
+      var el = document.getElementById('pages-list');
+      document.getElementById('pages-count').textContent = list.length;
+      if (!list.length) { el.innerHTML = '<div class="empty">无搜索结果</div>'; return; }
+      el.innerHTML = list.map(function (p) {
+        return '<div class="item" data-path="' + esc(p.path) + '">'
+          + '<div class="t">' + esc(p.title || p.path) + '</div>'
+          + '<div class="m">' + esc(p.path) + '</div>'
+          + (p.snippet ? '<div class="snip">' + esc(p.snippet) + '</div>' : '')
+          + '</div>';
+      }).join('');
+      el.querySelectorAll('.item').forEach(function (it) {
+        it.addEventListener('click', function () { openPage(it.getAttribute('data-path')); });
+      });
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  function setAuthStatus(ok) {
+    var el = document.getElementById('auth-status');
+    el.textContent = ok ? '已认证' : (KEY ? '认证失败' : '未设置 Key');
+    el.style.color = ok ? '#3fb950' : '#da3633';
+  }
+
+  // ── 编辑/新建（EasyMDE + marked + DOMPurify，本地化 lib）──
+  var mde = null;
+  function openEditor(path, content) {
+    var modal = document.getElementById('editor-modal');
+    document.getElementById('edit-path').value = path || '';
+    document.getElementById('edit-msg').textContent = '';
+    modal.style.display = 'flex';
+    if (!mde) {
+      mde = new EasyMDE({
+        element: document.getElementById('edit-content'),
+        spellChecker: false,
+        status: false,
+        previewRender: function (text) {
+          return DOMPurify.sanitize(marked.parse(text));  // XSS 防线
+        }
+      });
+    }
+    mde.value(content || '');
+    mde.codemirror.refresh();
+    setTimeout(function () { mde.codemirror.focus(); }, 50);
+  }
+  function closeEditor() {
+    document.getElementById('editor-modal').style.display = 'none';
+  }
+  function savePage() {
+    var path = (document.getElementById('edit-path').value || '').trim();
+    var content = mde ? mde.value() : '';
+    var msg = document.getElementById('edit-msg');
+    if (!path) { msg.textContent = '页面路径必填'; return; }
+    if (!path.toLowerCase().endsWith('.md')) { msg.textContent = '路径需以 .md 结尾'; return; }
+    var pages = {};
+    pages[path] = content;
+    api('/api/v1/wiki/import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pages: pages })
+    }).then(function (d) {
+      if (d && d.error) { msg.textContent = d.error; return; }
+      toast('已保存 ' + path);
+      closeEditor();
+      loadPages();
+      openPage(path);
+    }).catch(function (e) { msg.textContent = e.message; });
+  }
+  function editPage(path) {
+    api('/api/v1/wiki/page/' + encodeURIComponent(path)).then(function (d) {
+      var content = (d.content || d.page || '').toString();
+      openEditor(path, content);
+    }).catch(function (e) { toast(e.message, true); });
+  }
+
+  document.getElementById('btn-new-page').addEventListener('click', function () {
+    openEditor('', '# 新页面\n\n');
+  });
+
+  document.getElementById('btn-save-key').addEventListener('click', function () {
+    KEY = document.getElementById('api-key').value.trim();
+    localStorage.setItem('wiki_api_key', KEY);
+    toast('Key 已保存');
+    loadPages();
+    loadInbox();
+  });
+  document.getElementById('btn-search').addEventListener('click', doSearch);
+  document.getElementById('search-q').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') doSearch();
+  });
+  document.getElementById('btn-sync').addEventListener('click', function () {
+    // CD-042：全量同步耗时长（页数多时 20s+，实测 6429 页 23-24s），旧实现直连同步调用
+    // 会让按钮长时间无响应甚至超时。改为「后台触发 + 轮询状态」，权限与返回体语义不变。
+    api('/api/v1/wiki/sync?background=1').then(function (d) {
+      toast(d.already_running ? '同步进行中…' : '已开始同步…');
+      var tries = 0;
+      var timer = setInterval(function () {
+        tries++;
+        api('/api/v1/wiki/sync/status').then(function (s) {
+          if (!s.running) {
+            clearInterval(timer);
+            var r = s.last_result || {};
+            toast(s.last_error ? ('同步失败：' + s.last_error) : ('同步完成：inbox 新增 ' + (r.inbox_new || 0)));
+            loadInbox();
+          } else if (tries > 120) {
+            clearInterval(timer);
+            toast('同步仍在进行，稍后刷新查看', true);
+            loadInbox();
+          }
+        }).catch(function () { if (tries > 120) { clearInterval(timer); } });
+      }, 1500);
+    }).catch(function (e) { toast(e.message, true); });
+  });
+
+  // init
+  if (KEY) {
+    document.getElementById('api-key').value = KEY;
+    loadPages();
+    loadInbox();
+  } else {
+    setAuthStatus(false);
+    document.getElementById('pages-list').innerHTML = '<div class="empty">请先在上方填写 API Key 并保存</div>';
+  }
+})();
+</script>
+</body>
+</html>

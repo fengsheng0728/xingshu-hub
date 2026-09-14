@@ -1,0 +1,41 @@
+# .dockerignore — 构建上下文瘦身（CD-036，2026-09-14）
+# 背景：Dockerfile 用 `COPY . .`，而 examples/arch-site/node_modules 未跟踪但存在于工作区
+# （实测 243M），配合 dist/build/chroma_db/backups 会把构建上下文撑大数倍（构建变慢 + 镜像
+# 体积与泄密面变大）。下列条目一律不进构建上下文；运行期需要的数据由 volume 挂载。
+.git
+.github
+.gitignore
+.gitattributes
+.dockerignore
+.hermes
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+env/
+node_modules/
+**/node_modules/
+dist/
+build/
+**/dist/
+**/build/
+examples/arch-site/node_modules/
+examples/arch-site/dist/
+examples/arch-site/build/
+chroma_db/
+backups/
+audit/
+wiki/
+data-trunk/
+ystore.db
+*.db
+*.db-wal
+*.db-shm
+*.spec
+docs/*.docx
+*.log
+context_summary.log
+handoff-*.json
