@@ -1,0 +1,1179 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>星枢 Sync Hub — 信息权限中间件</title>
+  <!-- 铁律 5：完全离线，字体用系统栈（Space Grotesk 仅作首选装饰，缺失自动回落） -->
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-subtle: #fafafa;
+      --fg: #111111;
+      --fg-secondary: #555555;
+      --fg-tertiary: #999999;
+      --accent: #0d7377;
+      --accent-light: #e6f4f4;
+      --border: #e8e8e8;
+      --border-light: #f2f2f2;
+      --radius: 8px;
+      --font-en: 'Space Grotesk', 'Inter', 'Segoe UI', -apple-system, sans-serif;
+      --font-cn: 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', sans-serif;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    body {
+      font-family: var(--font-cn);
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.7;
+      font-size: 15px;
+      overflow-x: hidden;
+    }
+
+    /* ── Utility ── */
+    .container {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 0 32px;
+    }
+
+    .mono {
+      font-family: var(--font-en);
+      letter-spacing: -0.02em;
+    }
+
+    .fade-in {
+      opacity: 0;
+      transform: translateY(24px);
+      animation: fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    .fade-in-delay-1 { animation-delay: 0.1s; }
+    .fade-in-delay-2 { animation-delay: 0.2s; }
+    .fade-in-delay-3 { animation-delay: 0.35s; }
+    .fade-in-delay-4 { animation-delay: 0.5s; }
+
+    @keyframes fadeUp {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    /* ── Nav ── */
+    nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      z-index: 100;
+      background: rgba(255,255,255,0.92);
+      backdrop-filter: blur(12px) saturate(1.2);
+      border-bottom: 1px solid var(--border-light);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 64px;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 18px;
+      color: var(--fg);
+      text-decoration: none;
+    }
+
+    .logo-mark {
+      width: 28px;
+      height: 28px;
+      background: var(--fg);
+      border-radius: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 32px;
+      list-style: none;
+    }
+
+    .nav-links a {
+      color: var(--fg-secondary);
+      text-decoration: none;
+      font-size: 14px;
+      font-weight: 500;
+      transition: color 0.2s;
+      position: relative;
+    }
+
+    .nav-links a:hover {
+      color: var(--fg);
+    }
+
+    .nav-links a::after {
+      content: '';
+      position: absolute;
+      bottom: -4px;
+      left: 0;
+      width: 0;
+      height: 1.5px;
+      background: var(--accent);
+      transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .nav-links a:hover::after {
+      width: 100%;
+    }
+
+    /* ── Capability ── */
+    .capability-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+      margin-top: 60px;
+    }
+
+    .capability-card {
+      padding: 40px 36px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .capability-card::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--accent);
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .capability-card:hover {
+      border-color: #d0d0d0;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+      transform: translateY(-2px);
+    }
+
+    .capability-card:hover::before {
+      transform: scaleX(1);
+    }
+
+    .capability-card-header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 18px;
+    }
+
+    .capability-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 10px;
+      background: var(--bg-subtle);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .capability-icon svg {
+      color: var(--accent);
+    }
+
+    .capability-card h3 {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.01em;
+    }
+
+    .capability-card > p {
+      color: var(--fg-secondary);
+      font-size: 14px;
+      line-height: 1.7;
+      margin-bottom: 24px;
+    }
+
+    .capability-features {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .capability-features li {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      font-size: 13px;
+      color: var(--fg-secondary);
+      line-height: 1.6;
+    }
+
+    .capability-features li::before {
+      content: '';
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: var(--accent);
+      margin-top: 7px;
+      flex-shrink: 0;
+    }
+      width: 100%;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      padding: 160px 0 100px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-grid {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background-image:
+        linear-gradient(var(--border-light) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border-light) 1px, transparent 1px);
+      background-size: 80px 80px;
+      mask-image: radial-gradient(ellipse at 50% 0%, black 20%, transparent 70%);
+      -webkit-mask-image: radial-gradient(ellipse at 50% 0%, black 20%, transparent 70%);
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 14px;
+      border: 1px solid var(--border);
+      border-radius: 100px;
+      font-size: 13px;
+      color: var(--fg-secondary);
+      margin-bottom: 32px;
+    }
+
+    .hero-badge .dot {
+      width: 6px;
+      height: 6px;
+      background: var(--accent);
+      border-radius: 50%;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    .hero h1 {
+      font-family: var(--font-en);
+      font-size: clamp(40px, 6vw, 72px);
+      font-weight: 700;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      margin-bottom: 24px;
+    }
+
+    .hero h1 span {
+      color: var(--accent);
+    }
+
+    .hero-sub {
+      font-size: clamp(17px, 2vw, 20px);
+      color: var(--fg-secondary);
+      max-width: 560px;
+      line-height: 1.7;
+      margin-bottom: 40px;
+    }
+
+    .hero-meta {
+      display: flex;
+      gap: 32px;
+      flex-wrap: wrap;
+    }
+
+    .hero-meta-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .hero-meta-item .value {
+      font-family: var(--font-en);
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .hero-meta-item .label {
+      font-size: 13px;
+      color: var(--fg-tertiary);
+    }
+
+    /* ── Section Base ── */
+    section {
+      padding: 100px 0;
+      position: relative;
+    }
+
+    section + section::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100%;
+      max-width: 1120px;
+      height: 1px;
+      background: var(--border);
+    }
+
+    .section-label {
+      font-family: var(--font-en);
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--fg-tertiary);
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      font-family: var(--font-en);
+      font-size: clamp(28px, 3.5vw, 40px);
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.15;
+      margin-bottom: 20px;
+    }
+
+    .section-desc {
+      color: var(--fg-secondary);
+      font-size: 16px;
+      max-width: 560px;
+      line-height: 1.7;
+    }
+
+    /* ── Pillars ── */
+    .pillars {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+      margin-top: 60px;
+    }
+
+    .pillar {
+      padding: 36px 32px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .pillar::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--accent);
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .pillar:hover {
+      border-color: #d0d0d0;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.04);
+      transform: translateY(-2px);
+    }
+
+    .pillar:hover::before {
+      transform: scaleX(1);
+    }
+
+    .pillar-num {
+      font-family: var(--font-en);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg-tertiary);
+      margin-bottom: 16px;
+    }
+
+    .pillar h3 {
+      font-size: 20px;
+      font-weight: 700;
+      margin-bottom: 12px;
+      letter-spacing: -0.01em;
+    }
+
+    .pillar p {
+      color: var(--fg-secondary);
+      font-size: 14px;
+      line-height: 1.7;
+    }
+
+    /* ── Architecture ── */
+    .arch-diagram {
+      margin-top: 60px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 48px;
+      background: var(--bg-subtle);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .arch-row {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .arch-row:last-child {
+      margin-bottom: 0;
+    }
+
+    .arch-block {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      transition: all 0.25s ease;
+    }
+
+    .arch-block:hover {
+      border-color: var(--accent);
+      box-shadow: 0 2px 12px rgba(13,115,119,0.06);
+    }
+
+    .arch-block-title {
+      font-family: var(--font-en);
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--fg);
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .arch-block-detail {
+      font-size: 12px;
+      color: var(--fg-tertiary);
+      line-height: 1.6;
+    }
+
+    .arch-connector {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 8px 0;
+    }
+
+    .arch-connector-line {
+      width: 1px;
+      height: 24px;
+      background: var(--border);
+      position: relative;
+    }
+
+    .arch-connector-label {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--bg-subtle);
+      padding: 0 10px;
+      font-size: 11px;
+      color: var(--fg-tertiary);
+      white-space: nowrap;
+    }
+
+    /* ── Modules ── */
+    .modules-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 1px;
+      margin-top: 60px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .module-cell {
+      background: var(--bg);
+      padding: 28px 24px;
+      transition: background 0.2s;
+    }
+
+    .module-cell:hover {
+      background: var(--bg-subtle);
+    }
+
+    .module-cell h4 {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .module-cell p {
+      font-size: 13px;
+      color: var(--fg-secondary);
+      line-height: 1.6;
+    }
+
+    .module-tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 600;
+      margin-left: auto;
+    }
+
+    .tag-core { background: var(--accent-light); color: var(--accent); }
+    .tag-unique { background: #fff3e0; color: #e65100; }
+    .tag-new { background: #e8f5e9; color: #2e7d32; }
+
+    /* ── Disclosure Visual ── */
+    .disclosure-visual {
+      margin-top: 60px;
+      display: flex;
+      gap: 0;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+    }
+
+    .disclosure-level {
+      flex: 1;
+      padding: 36px 28px;
+      text-align: center;
+      border-right: 1px solid var(--border-light);
+      position: relative;
+      transition: all 0.3s ease;
+    }
+
+    .disclosure-level:last-child {
+      border-right: none;
+    }
+
+    .disclosure-level:hover {
+      background: var(--bg-subtle);
+    }
+
+    .disclosure-level .level-icon {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      margin: 0 auto 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .level-none .level-icon { background: #ffebee; color: #c62828; }
+    .level-meta .level-icon { background: #fff8e1; color: #f9a825; }
+    .level-summary .level-icon { background: #e3f2fd; color: #1565c0; }
+    .level-full .level-icon { background: #e8f5e9; color: #2e7d32; }
+
+    .disclosure-level h4 {
+      font-size: 15px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .disclosure-level p {
+      font-size: 13px;
+      color: var(--fg-secondary);
+    }
+
+    .disclosure-arrow {
+      position: absolute;
+      right: -12px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 24px;
+      height: 24px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      color: var(--fg-tertiary);
+      z-index: 2;
+    }
+
+    /* ── Stats ── */
+    .stats-bar {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 1px;
+      background: var(--border);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      margin-top: 60px;
+    }
+
+    .stat-item {
+      background: var(--bg);
+      padding: 32px 24px;
+      text-align: center;
+      transition: background 0.2s;
+    }
+
+    .stat-item:hover {
+      background: var(--bg-subtle);
+    }
+
+    .stat-item .num {
+      font-family: var(--font-en);
+      font-size: 36px;
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      color: var(--fg);
+    }
+
+    .stat-item .num-sub {
+      font-size: 14px;
+      color: var(--fg-tertiary);
+      font-weight: 400;
+    }
+
+    .stat-item .label {
+      font-size: 13px;
+      color: var(--fg-secondary);
+      margin-top: 6px;
+    }
+
+    /* ── Footer ── */
+    footer {
+      padding: 60px 0 48px;
+      border-top: 1px solid var(--border);
+    }
+
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+
+    .footer-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      font-size: 15px;
+    }
+
+    .footer-right {
+      font-size: 13px;
+      color: var(--fg-tertiary);
+    }
+
+    /* ── Responsive ── */
+    @media (max-width: 768px) {
+      .nav-links { display: none; }
+      .hero { padding: 120px 0 60px; }
+      section { padding: 60px 0; }
+      .arch-row { flex-direction: column; }
+      .disclosure-visual { flex-direction: column; }
+      .disclosure-level { border-right: none; border-bottom: 1px solid var(--border-light); }
+      .disclosure-level:last-child { border-bottom: none; }
+      .disclosure-arrow { display: none; }
+      .capability-grid { grid-template-columns: 1fr; }
+      .stats-bar { grid-template-columns: repeat(2, 1fr); }
+      .footer-inner { flex-direction: column; text-align: center; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Nav -->
+  <nav>
+    <div class="container nav-inner">
+      <a href="#" class="logo">
+        <div class="logo-mark mono">星</div>
+        <span class="mono">Sync Hub</span>
+      </a>
+      <ul class="nav-links">
+        <li><a href="#concept">核心理念</a></li>
+        <li><a href="#capability">能力中枢</a></li>
+        <li><a href="#arch">架构</a></li>
+        <li><a href="#modules">模块</a></li>
+        <li><a href="#disclosure">披露引擎</a></li>
+        <li><a href="#stats">数据</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero" id="top">
+    <div class="hero-grid"></div>
+    <div class="container">
+      <div class="hero-badge fade-in">
+        <span class="dot"></span>
+        <span class="mono">v1.0.0 · 2026.08</span>
+      </div>
+      <h1 class="fade-in fade-in-delay-1">
+        信息权限<br>中间件
+      </h1>
+      <p class="hero-sub fade-in fade-in-delay-2">
+        星枢 Sync Hub 为 Agent 协同提供<strong>写入隔离、渐进披露、角色分级</strong>三大基座。
+        不绑定任何行业——客服、法务、销售、项目管理均可即用。
+      </p>
+      <div class="hero-meta fade-in fade-in-delay-3">
+        <div class="hero-meta-item">
+          <span class="value mono">166</span>
+          <span class="label">REST 端点</span>
+        </div>
+        <div class="hero-meta-item">
+          <span class="value mono">24+</span>
+          <span class="label">LLM 工具</span>
+        </div>
+        <div class="hero-meta-item">
+          <span class="value mono">392</span>
+          <span class="label">回归测试全绿</span>
+        </div>
+        <div class="hero-meta-item">
+          <span class="value mono">11</span>
+          <span class="label">页管理控制台</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Concept -->
+  <section id="concept">
+    <div class="container">
+      <p class="section-label mono fade-in">Core Concept</p>
+      <h2 class="section-title fade-in fade-in-delay-1">
+        写入隔离 + 渐进披露 + 角色分级
+      </h2>
+      <p class="section-desc fade-in fade-in-delay-2">
+        星枢不只是一个 Agent 连接器，而是一个信息权限中间件。
+        它决定了谁能看到什么、能写入什么、何时披露——在数据产生的第一刻就施加控制。
+      </p>
+
+      <div class="pillars">
+        <div class="pillar fade-in fade-in-delay-1">
+          <div class="pillar-num mono">01</div>
+          <h3>写入隔离</h3>
+          <p>所有 Agent 的记忆写入先入队列，后台 worker 批量落库。避免 SQLite 锁竞争，支持 200 并发峰值 3.59s 内完成，零丢失、零超时。</p>
+        </div>
+        <div class="pillar fade-in fade-in-delay-2">
+          <div class="pillar-num mono">02</div>
+          <h3>渐进披露</h3>
+          <p>8 条确定性披露规则，4 级披露级别（NONE / METADATA / SUMMARY / FULL）。请求 → 规则匹配 → 自动或人工审批 → 返回结果。</p>
+        </div>
+        <div class="pillar fade-in fade-in-delay-3">
+          <div class="pillar-num mono">03</div>
+          <h3>角色分级</h3>
+          <p>多 Hub 联邦配对、跨 Hub 披露代理、身份接入（Local / LDAP / OIDC）、API Key 自动轮换。权限按组交集计算，细粒度可控。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Capability Hub -->
+  <section id="capability">
+    <div class="container">
+      <p class="section-label mono fade-in">Capability Hub</p>
+      <h2 class="section-title fade-in fade-in-delay-1">
+        AI 中台 × 企业知识库
+      </h2>
+      <p class="section-desc fade-in fade-in-delay-2">
+        Hub 不仅是连接层，更是 AI 能力中枢与企业知识的统一入口。
+        LangChain 驱动的智能体可直接调用记忆、知识、任务等全部能力；
+        企业知识库则通过语义检索与图谱化，让信息从「存起来」变成「找得到」。
+      </p>
+
+      <div class="capability-grid">
+        <div class="capability-card fade-in fade-in-delay-1">
+          <div class="capability-card-header">
+            <div class="capability-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2zm0 18a8 8 0 1 1 8-8 8 8 0 0 1-8 8z"/><path d="M12 6v6l4 2"/></svg>
+            </div>
+            <h3>AI 中台</h3>
+          </div>
+          <p>Hub 作为 AI 能力中枢，统一调度 11 个 LLM 级工具。Agent 无需关心底层实现，通过自然语言即可调用记忆搜索、知识查询、任务创建等全部能力。</p>
+          <ul class="capability-features">
+            <li>语义搜索记忆池——ChromaDB 向量化 + SQLite 降级双路径</li>
+            <li>知识库查询——结构化知识 + 图谱关系 + 自动补全</li>
+            <li>在线 Agent 感知——列出可用 Agent、创建并分配任务</li>
+            <li>披露审批门控——LangChain 工具直接 approve / deny</li>
+            <li>Wiki 内容注入——从记忆自动构建知识、增量去重入库</li>
+          </ul>
+        </div>
+        <div class="capability-card fade-in fade-in-delay-2">
+          <div class="capability-card-header">
+            <div class="capability-icon">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+            </div>
+            <h3>企业知识库</h3>
+          </div>
+          <p>三层模型驱动的企业知识引擎：Markdown 编辑层、[[wikilink]] 链接层、D3 图谱可视化层。新知识先进入收件箱审查，人工 approve 后才正式发布。</p>
+          <ul class="capability-features">
+            <li>语义检索——ChromaDB 向量存储，自然语言即可命中知识</li>
+            <li>知识图谱——节点关系可视化，发现隐性关联</li>
+            <li>Wiki 引擎——EasyMDE 本地化编辑、增量 SHA256 去重</li>
+            <li>收件箱审查——ThinkWiki 模式：pending → approve / reject</li>
+            <li>记忆自动构建——从 Agent 对话记忆中提取并 upsert 到知识库</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Architecture -->
+  <section id="arch">
+    <div class="container">
+      <p class="section-label mono fade-in">Architecture</p>
+      <h2 class="section-title fade-in fade-in-delay-1">
+        Hub + Agent 端双层架构
+      </h2>
+      <p class="section-desc fade-in fade-in-delay-2">
+        Hub 负责核心逻辑与数据持久化，Agent 端是通用协同终端。
+        双方通过 WebSocket 全双工通信，REST 端点覆盖全部管理操作。
+      </p>
+
+      <div class="arch-diagram fade-in fade-in-delay-3">
+        <!-- Agent 端 -->
+        <div class="arch-row">
+          <div class="arch-block">
+            <div class="arch-block-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+              Electron Agent 端
+            </div>
+            <div class="arch-block-detail">渲染进程 · Python 后端 · 主进程 IPC · 系统托盘</div>
+          </div>
+        </div>
+        <div class="arch-connector">
+          <div class="arch-connector-line">
+            <span class="arch-connector-label mono">WebSocket</span>
+          </div>
+        </div>
+        <!-- Hub -->
+        <div class="arch-row">
+          <div class="arch-block">
+            <div class="arch-block-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+              Sync Hub Core
+            </div>
+            <div class="arch-block-detail">hub_core + 10+ Mixin · 21 个路由模块 · 166 路由</div>
+          </div>
+          <div class="arch-block">
+            <div class="arch-block-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+              披露引擎
+            </div>
+            <div class="arch-block-detail">469 行 · 8 条规则 · 4 级披露</div>
+          </div>
+          <div class="arch-block">
+            <div class="arch-block-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+              SQLite + ChromaDB
+            </div>
+            <div class="arch-block-detail">语义搜索 · 降级策略 · 版本回滚</div>
+          </div>
+        </div>
+        <div class="arch-row" style="margin-top: 16px;">
+          <div class="arch-block">
+            <div class="arch-block-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+              团队联邦
+            </div>
+            <div class="arch-block-detail">UDP 发现 · P2P 配对 · AES-GCM 加密</div>
+          </div>
+          <div class="arch-block">
+            <div class="arch-block-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              共享工作区
+            </div>
+            <div class="arch-block-detail">pycrdt CRDT · YRoom · 实时协同</div>
+          </div>
+          <div class="arch-block">
+            <div class="arch-block-title">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              自动化调度
+            </div>
+            <div class="arch-block-detail">1s tick · croniter · heartbeat 触发</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Modules -->
+  <section id="modules">
+    <div class="container">
+      <p class="section-label mono fade-in">Modules</p>
+      <h2 class="section-title fade-in fade-in-delay-1">
+        核心模块一览
+      </h2>
+      <p class="section-desc fade-in fade-in-delay-2">
+        从记忆池到团队联邦，从 Wiki 引擎到自动化调度——星枢提供 Agent 协同所需的完整基础设施。
+      </p>
+
+      <div class="modules-grid fade-in fade-in-delay-3">
+        <div class="module-cell">
+          <h4>
+            记忆池
+            <span class="module-tag tag-core">Core</span>
+          </h4>
+          <p>语义搜索、版本历史、回滚、ChromaDB / SQLite 双路径降级</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            任务调度
+            <span class="module-tag tag-core">Core</span>
+          </h4>
+          <p>状态机 + DAG 依赖 + 环检测 + 看板视图 + 子任务拆解</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            写入缓冲
+            <span class="module-tag tag-core">Core</span>
+          </h4>
+          <p>异步攒批 + 500ms 落盘 + 5s Wiki 节流 + WAL 持久化 replay</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            渐进披露
+            <span class="module-tag tag-unique">Unique</span>
+          </h4>
+          <p>8 条确定性规则、4 级披露、自动审批 / 人工门控、审计追踪</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            团队联邦
+            <span class="module-tag tag-unique">Unique</span>
+          </h4>
+          <p>UDP 局域网发现、6 位配对码、X25519 DH、跨 Hub 披露代理</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            通知系统
+            <span class="module-tag tag-unique">Unique</span>
+          </h4>
+          <p>站内 WS + 钉钉 WebHook + SMTP、异步 fan-out、channel_status 落库</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            Wiki 引擎
+            <span class="module-tag tag-new">New</span>
+          </h4>
+          <p>收件箱审查、增量 SHA256 去重、EasyMDE 本地化编辑、图谱可视化</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            共享工作区
+            <span class="module-tag tag-new">New</span>
+          </h4>
+          <p>pycrdt YRoom + SQLiteYStore、awareness 在线列表、REST + WS 双通道</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            LangChain Hub Agent
+            <span class="module-tag tag-core">Core</span>
+          </h4>
+          <p>11 个 Hub 级 LLM 工具、语义搜索记忆池、知识库查询、任务创建</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            安全审计
+            <span class="module-tag tag-core">Core</span>
+          </h4>
+          <p>Hash chain 审计日志、篡改精确定位、身份接入、API Key 自动轮换</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            自动化调度
+            <span class="module-tag tag-new">New</span>
+          </h4>
+          <p>croniter 标准表达式、heartbeat 驱动、暂停 / 恢复 / 重试 / 跳过</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            MCP Server
+            <span class="module-tag tag-core">Core</span>
+          </h4>
+          <p>7 个 tools、SSE 传输、Bearer 认证、Wiki / Buffer / 图谱暴露</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            集成层 Integration Hub
+            <span class="module-tag tag-new">New</span>
+          </h4>
+          <p>Connector 目录扫描注册、AES-GCM 凭证、附录 E 管道 taint=external、出站审批门——接入新系统只写一个适配器文件</p>
+        </div>
+        <div class="module-cell">
+          <h4>
+            管理控制台
+            <span class="module-tag tag-new">New</span>
+          </h4>
+          <p>Vue3 + Pinia 11 页四区：总览 / 运行 / 活动 / 访问 / 审计 / 披露 / 知识 / Wiki / 记忆 / 集成 / 设置，亮暗同稿、完全离线</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Disclosure -->
+  <section id="disclosure">
+    <div class="container">
+      <p class="section-label mono fade-in">Disclosure Engine</p>
+      <h2 class="section-title fade-in fade-in-delay-1">
+        四级渐进披露
+      </h2>
+      <p class="section-desc fade-in fade-in-delay-2">
+        星枢的披露引擎是市面上唯一将「渐进式披露」作为核心引擎的开源项目。
+        8 条确定性规则，从完全拒绝到完整内容，每一步都可审计、可回滚。
+      </p>
+
+      <div class="disclosure-visual fade-in fade-in-delay-3">
+        <div class="disclosure-level level-none">
+          <div class="level-icon">✕</div>
+          <h4>NONE</h4>
+          <p>完全拒绝</p>
+          <div class="disclosure-arrow">→</div>
+        </div>
+        <div class="disclosure-level level-meta">
+          <div class="level-icon">⋯</div>
+          <h4>METADATA</h4>
+          <p>仅元数据</p>
+          <div class="disclosure-arrow">→</div>
+        </div>
+        <div class="disclosure-level level-summary">
+          <div class="level-icon">≡</div>
+          <h4>SUMMARY</h4>
+          <p>摘要内容</p>
+          <div class="disclosure-arrow">→</div>
+        </div>
+        <div class="disclosure-level level-full">
+          <div class="level-icon">✓</div>
+          <h4>FULL</h4>
+          <p>完整内容</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Stats -->
+  <section id="stats">
+    <div class="container">
+      <p class="section-label mono fade-in">Numbers</p>
+      <h2 class="section-title fade-in fade-in-delay-1">
+        数据说话
+      </h2>
+      <p class="section-desc fade-in fade-in-delay-2">
+        每一个数字背后都是一次 commit、一轮压测、一份验收表。
+      </p>
+
+      <div class="stats-bar fade-in fade-in-delay-3">
+        <div class="stat-item">
+          <div class="num mono">392<span class="num-sub">+279</span></div>
+          <div class="label">Hub / Agent 测试全绿</div>
+        </div>
+        <div class="stat-item">
+          <div class="num mono">6.3<span class="num-sub">s</span></div>
+          <div class="label">200 并发峰值入队延迟（原 31.1s）</div>
+        </div>
+        <div class="stat-item">
+          <div class="num mono">0</div>
+          <div class="label">锁竞争 / 超时 / 丢失</div>
+        </div>
+        <div class="stat-item">
+          <div class="num mono">153</div>
+          <div class="label">REST 端点覆盖</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer>
+    <div class="container footer-inner">
+      <div class="footer-left">
+        <div class="logo-mark mono" style="width:24px;height:24px;border-radius:5px;font-size:11px;">星</div>
+        <span class="mono">Sync Hub</span>
+      </div>
+      <div class="footer-right mono">
+        信息权限中间件 · 写入隔离 · 渐进披露 · 角色分级
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Intersection Observer for scroll-triggered animations
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.style.animationPlayState = 'running';
+        }
+      });
+    }, { threshold: 0.1 });
+
+    document.querySelectorAll('.fade-in').forEach(el => {
+      el.style.animationPlayState = 'paused';
+      observer.observe(el);
+    });
+
+    // Smooth scroll for nav links
+    document.querySelectorAll('a[href^="#"]').forEach(anchor => {
+      anchor.addEventListener('click', function(e) {
+        e.preventDefault();
+        const target = document.querySelector(this.getAttribute('href'));
+        if (target) {
+          target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+      });
+    });
+  </script>
+
+</body>
+</html>

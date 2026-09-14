@@ -1,0 +1,23 @@
+# 星枢 Sync Hub — 可选向量栈依赖（非核心，合计约 2GB）
+# 安装: pip install -r requirements-vector.txt（需先装核心: pip install -r requirements.txt）
+#
+# 用途：以下三项能力依赖本文件，未安装时 Hub 仍可启动并自动降级：
+#   - chromadb              → ChromaDB 语义检索；缺失时降级为 SQLite 关键词检索（CD-016）
+#   - sentence-transformers → 真语义嵌入（EMBEDDING_PROVIDER=sentence）；
+#                             默认 provider=hasher 不需要本包
+#   - langchain 三件套       → Hub Agent LLM 对话（/api/v1/hub-agent/chat 等端点）；
+#                             缺失时端点返回 {"status":"degraded"} 降级响应而非 500
+#
+# 钉版风格与 requirements.txt 一致（~= 锁兼容范围，允许补丁级升级）；
+# 三件套的传递依赖（torch/transformers 等）由 pip 按钉版自动解析。
+
+# 向量数据库（语义检索）
+chromadb~=1.5.9
+
+# 嵌入模型（真语义嵌入，sentence provider）
+sentence-transformers~=5.6.0
+
+# AI / LLM（Hub Agent 对话链）
+langchain~=1.3.13
+langchain-core~=1.4.9
+langchain-openai~=1.3.5

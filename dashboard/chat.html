@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="favicon.png">
+<title>Hub Agent · 星枢</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{height:100vh;display:flex;flex-direction:column}
+.topbar{display:flex;align-items:center;padding:8px 16px;gap:12px;background:#fff;border-bottom:1px solid #e5e7eb;flex-shrink:0}
+.topbar h1{font-size:14px}.topbar h1 span{color:var(--accent)}
+.status{font-size:11px;color:#9ca3af}
+.btn{background:var(--card-border);border:1px solid #e5e7eb;border-radius:6px;color:#2c2c2c;padding:5px 12px;font-size:12px;cursor:pointer;text-decoration:none;transition:all .15s}
+.btn:hover{background:#e5e7eb}
+.main{flex:1;display:flex;overflow:hidden}
+.sidebar{width:240px;background:#fff;border-right:1px solid #e5e7eb;display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-header{padding:12px;border-bottom:1px solid #e5e7eb;font-size:12px;font-weight:600;display:flex;justify-content:space-between;align-items:center}
+.session-list{flex:1;overflow-y:auto}
+.session-item{padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--card-border);font-size:12px;transition:background .1s;display:flex;justify-content:space-between}
+.session-item:hover{background:var(--accent-soft)}.session-item.active{background:var(--accent-soft);border-left:3px solid var(--accent);padding-left:11px}
+.session-item .title{color:#2c2c2c;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.session-item .time{color:#9ca3af;font-size:10px;flex-shrink:0;margin-left:8px}
+.session-item .del{display:none;color:#ef4444;cursor:pointer;font-size:12px;margin-left:4px}
+.session-item:hover .del{display:inline}
+.chat-wrap{flex:1;display:flex;flex-direction:column;min-width:0}
+.chat-body{flex:1;overflow-y:auto;padding:16px 20px}
+.chat-msg{margin-bottom:12px;display:flex;gap:8px}
+.chat-msg.user{flex-direction:row-reverse}
+.chat-msg .avatar{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0}
+.chat-msg.user .avatar{background:var(--accent)}.chat-msg.agent .avatar{background:var(--card-border)}
+.chat-msg .bubble{max-width:70%;padding:10px 14px;border-radius:12px;font-size:13px;line-height:1.6;white-space:pre-wrap}
+.chat-msg.user .bubble{background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+.chat-msg.agent .bubble{background:var(--card-border);color:#2c2c2c;border-bottom-left-radius:4px}
+.chat-input-wrap{display:flex;gap:8px;padding:12px 20px;border-top:1px solid #e5e7eb;background:#fff}
+.chat-input-wrap input{flex:1;border:1px solid #e5e7eb;border-radius:8px;padding:10px 14px;font-size:13px;outline:none;background:#f9fafb}
+.chat-input-wrap input:focus{border-color:var(--accent);background:#fff}
+.chat-input-wrap button{background:var(--accent);color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:13px;cursor:pointer;font-weight:500}
+.chat-input-wrap button:disabled{opacity:.5}
+.empty{text-align:center;color:#9ca3af;padding:60px 20px;font-size:13px}.empty .icon{font-size:48px;margin-bottom:12px}
+</style>
+<script src="/static/auth.js"></script>
+<link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+<div class="topbar">
+  <h1>🤖 星枢<span>Hub Agent</span></h1>
+  <span class="status" id="agent-status">未配置</span>
+  <a href="/" class="btn" style="margin-left:auto">← 控制台</a>
+  <a href="/report" class="btn">📊 日报</a>
+</div>
+<div class="main">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <span>💬 对话历史</span>
+      <button class="btn" onclick="newChat()" style="font-size:11px;padding:3px 8px">＋ 新对话</button>
+    </div>
+    <div class="session-list" id="session-list"></div>
+  </div>
+  <div class="chat-wrap">
+    <div class="chat-body" id="chat-messages">
+      <div class="empty"><div class="icon">🤖</div><p>Hub Agent 是你的 AI 助手</p></div>
+    </div>
+    <div class="chat-input-wrap">
+      <input id="chat-input" placeholder="输入问题..." onkeydown="if(event.key==='Enter')sendChat()">
+      <button id="send-btn" onclick="sendChat()">发送</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = window.location.origin;
+// P0: 统一 token 注入 — 所有 fetch 自动携带 Authorization，401 弹输入门
+const __dashFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.headers = DashAuth.authHeaders(opts.headers || {});
+  return __dashFetch(url, opts).then(function (r) {
+    if (r.status === 401) DashAuth.showGate();
+    return r;
+  });
+};
+
+let sessions = JSON.parse(localStorage.getItem('ha_sessions') || '[]');
+let currentSession = sessions.length ? sessions[0] : null;
+
+function newChat() {
+  const s = { id: 's' + Date.now(), title: '新对话', updated: new Date().toISOString() };
+  sessions.unshift(s);
+  saveSessions();
+  switchSession(s);
+}
+
+function switchSession(s) {
+  currentSession = s;
+  document.getElementById('chat-messages').innerHTML = '<div class="loading" style="text-align:center;padding:20px;color:#9ca3af">⏳ 加载中...</div>';
+  renderSessions();
+  loadMessages(s.id);
+}
+
+function saveSessions() {
+  sessions = sessions.slice(0, 50); // Keep max 50
+  localStorage.setItem('ha_sessions', JSON.stringify(sessions));
+}
+
+function renderSessions() {
+  const el = document.getElementById('session-list');
+  el.innerHTML = sessions.map(s => `
+    <div class="session-item${currentSession && currentSession.id===s.id?' active':''}" onclick="switchSession(${JSON.stringify(s).replace(/"/g,'&quot;')})">
+      <span class="title">${esc(s.title)}</span>
+      <span class="time">${new Date(s.updated).toLocaleDateString('zh-CN',{month:'short',day:'numeric'})}</span>
+      <span class="del" onclick="event.stopPropagation();deleteSession('${s.id}')">✕</span>
+    </div>`).join('');
+}
+
+async function loadMessages(sessionId) {
+  try {
+    const r = await fetch(`${API}/api/v1/hub-agent/chat/history?session_id=${encodeURIComponent(sessionId)}`);
+    const d = await r.json();
+    const el = document.getElementById('chat-messages');
+    if (d.messages && d.messages.length) {
+      el.innerHTML = d.messages.map(m => `
+        <div class="chat-msg ${m.role}">
+          <div class="avatar">${m.role==='user'?'👤':'🤖'}</div>
+          <div class="bubble">${esc(m.content).replace(/\\n/g,'<br>')}</div>
+        </div>`).join('');
+    } else {
+      el.innerHTML = '<div class="empty"><div class="icon">🤖</div><p>开始对话吧</p></div>';
+    }
+    el.scrollTop = el.scrollHeight;
+  } catch(e) { document.getElementById('chat-messages').innerHTML = '<div class="empty">加载失败</div>'; }
+}
+
+async function sendChat() {
+  const input = document.getElementById('chat-input');
+  const msg = input.value.trim();
+  if (!msg) return;
+  if (!currentSession) newChat();
+  input.value = '';
+  input.disabled = true;
+  document.getElementById('send-btn').disabled = true;
+
+  const el = document.getElementById('chat-messages');
+  el.querySelector('.empty')?.remove();
+  appendMsg('user', msg);
+  const typing = appendMsg('agent', '⏳');
+
+  try {
+    const r = await fetch(`${API}/api/v1/hub-agent/chat`, {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({message: msg, session_id: currentSession.id})
+    });
+    const d = await r.json();
+    typing.remove();
+    if (d.status === 'ok') {
+      appendMsg('agent', d.reply);
+      currentSession.title = msg.slice(0, 20);
+      currentSession.updated = new Date().toISOString();
+      saveSessions();
+      renderSessions();
+    } else {
+      appendMsg('agent', '❌ ' + (d.error || '出错了'));
+      if (d.error && d.error.includes('未配置')) appendMsg('agent', '请先在 ⚙️ 设置中配置 Hub Agent。');
+    }
+  } catch(e) { typing.remove(); appendMsg('agent', '❌ 网络错误'); }
+  input.disabled = false;
+  document.getElementById('send-btn').disabled = false;
+  input.focus();
+}
+
+function appendMsg(role, content) {
+  const el = document.getElementById('chat-messages');
+  const div = document.createElement('div');
+  div.className = 'chat-msg ' + role;
+  div.innerHTML = `<div class="avatar">${role==='user'?'👤':'🤖'}</div><div class="bubble">${esc(content).replace(/\\n/g,'<br>')}</div>`;
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+  return div;
+}
+
+async function deleteSession(id) {
+  await fetch(`${API}/api/v1/hub-agent/chat/clear`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: id})
+  });
+  sessions = sessions.filter(s => s.id !== id);
+  if (currentSession && currentSession.id === id) {
+    currentSession = sessions.length ? sessions[0] : null;
+    document.getElementById('chat-messages').innerHTML = '<div class="empty"><div class="icon">🤖</div><p>Hub Agent 是你的 AI 助手</p></div>';
+  }
+  saveSessions();
+  renderSessions();
+}
+
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+// Init
+(async () => {
+  try {
+    const r = await fetch(`${API}/api/v1/hub-agent/config`);
+    const c = await r.json();
+    document.getElementById('agent-status').textContent = c.enabled==='true' ? '🟢 '+c.model : '⚪ 未配置';
+  } catch(e) {}
+  renderSessions();
+  if (currentSession) loadMessages(currentSession.id);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,142 @@
+{
+  "k25": {
+    "concurrency": 25,
+    "requests_ok": 799,
+    "http_timeout": 0,
+    "http_other": 0,
+    "db_locked": 0,
+    "peak_enqueue_latency_s": 2.95,
+    "avg_enqueue_latency_s": 0.973,
+    "queue_depth_after": 0,
+    "sync_fallback_count": 0,
+    "total_flushed": 4281,
+    "db_new": 799,
+    "data_lost": 0,
+    "buffer_drained": true
+  },
+  "k50": {
+    "concurrency": 50,
+    "requests_ok": 709,
+    "http_timeout": 0,
+    "http_other": 0,
+    "db_locked": 0,
+    "peak_enqueue_latency_s": 4.302,
+    "avg_enqueue_latency_s": 2.221,
+    "queue_depth_after": 0,
+    "sync_fallback_count": 0,
+    "total_flushed": 4990,
+    "db_new": 709,
+    "data_lost": 0,
+    "buffer_drained": true
+  },
+  "k100": {
+    "concurrency": 100,
+    "requests_ok": 527,
+    "http_timeout": 0,
+    "http_other": 0,
+    "db_locked": 0,
+    "peak_enqueue_latency_s": 10.983,
+    "avg_enqueue_latency_s": 6.805,
+    "queue_depth_after": 0,
+    "sync_fallback_count": 0,
+    "total_flushed": 5517,
+    "db_new": 527,
+    "data_lost": 0,
+    "buffer_drained": true
+  },
+  "k200": {
+    "concurrency": 200,
+    "requests_ok": 415,
+    "http_timeout": 0,
+    "http_other": 0,
+    "db_locked": 0,
+    "peak_enqueue_latency_s": 31.13,
+    "avg_enqueue_latency_s": 19.294,
+    "queue_depth_after": 0,
+    "sync_fallback_count": 0,
+    "total_flushed": 5932,
+    "db_new": 415,
+    "data_lost": 0,
+    "buffer_drained": true
+  },
+  "25": {
+    "concurrency": 25,
+    "duration_s": 30.2,
+    "requests_ok": 1423,
+    "http_timeout": 0,
+    "db_locked": 0,
+    "peak_latency_s": 4.37,
+    "avg_latency_s": 0.519,
+    "db_total_after": 370
+  },
+  "50": {
+    "concurrency": 50,
+    "duration_s": 30.5,
+    "requests_ok": 1944,
+    "http_timeout": 0,
+    "db_locked": 0,
+    "peak_latency_s": 1.058,
+    "avg_latency_s": 0.768,
+    "db_total_after": 382
+  },
+  "100": {
+    "concurrency": 100,
+    "duration_s": 30.9,
+    "requests_ok": 1889,
+    "http_timeout": 0,
+    "db_locked": 0,
+    "peak_latency_s": 2.561,
+    "avg_latency_s": 1.601,
+    "db_total_after": 382
+  },
+  "200": {
+    "concurrency": 200,
+    "duration_s": 32.2,
+    "requests_ok": 1710,
+    "http_timeout": 0,
+    "db_locked": 0,
+    "peak_latency_s": 4.777,
+    "avg_latency_s": 3.631,
+    "db_total_after": 382
+  },
+  "t22": {
+    "rounds": [
+      [
+        1,
+        2,
+        1.7
+      ],
+      [
+        2,
+        2,
+        1.6
+      ],
+      [
+        3,
+        2,
+        1.5
+      ],
+      [
+        4,
+        2,
+        1.6
+      ],
+      [
+        5,
+        2,
+        1.6
+      ]
+    ],
+    "conclusion": "全部成功"
+  },
+  "t23": {
+    "observe_a": "被拒 PermissionError: [WinError 5] 拒绝访问。: 'E:\\\\sync-hub-case\\\\chroma_db'",
+    "base_total": 5,
+    "degraded_total": 5,
+    "degraded_mark": true,
+    "degraded_has_result": true,
+    "semantic_search_status": 200,
+    "semantic_search_body": "{\"status\": \"error\", \"message\": \"ChromaDB 未初始化\"}",
+    "recovered": true
+  }
+}

@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="favicon.png">
+<title>日报 · 星枢</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{min-height:100vh}
+.topbar{display:flex;align-items:center;padding:12px 20px;gap:12px;background:#fff;border-bottom:1px solid var(--card-border)}
+.topbar h1{font-size:15px}.topbar h1 span{color:var(--accent);font-weight:400}
+.btn{background:transparent;border:1px solid var(--card-border);border-radius:6px;color:#2c2c2c;padding:6px 14px;font-size:12px;cursor:pointer;text-decoration:none;transition:all .15s}
+.btn:hover{background:var(--card-border)}.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}.btn-primary:hover{background:var(--accent)}
+.content{max-width:900px;margin:0 auto;padding:24px 20px}
+.summary-card{background:#fff;border:1px solid var(--card-border);border-radius:12px;padding:20px 24px;margin-bottom:20px}
+.summary-card h2{font-size:16px;margin-bottom:12px;color:var(--accent)}
+.summary-card .ai-summary{font-size:14px;line-height:1.8;white-space:pre-wrap;color:#2c2c2c}
+.summary-card .no-ai{color:#9ca3af;font-size:13px}
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px}
+.stat-card{background:#fff;border:1px solid var(--card-border);border-radius:10px;padding:16px;text-align:center}
+.stat-card .num{font-size:28px;font-weight:700;color:var(--accent)}
+.stat-card .label{font-size:11px;color:#9ca3af;margin-top:4px}
+.stat-card .sub{font-size:11px;color:#9ca3af;margin-top:2px}
+.tag-list{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.tag-item{font-size:11px;padding:3px 10px;border-radius:12px;background:var(--accent-soft);color:var(--accent)}
+.tag-item .cnt{color:#9ca3af;margin-left:4px}
+.loading{text-align:center;color:#9ca3af;padding:60px;font-size:14px}
+.audit-card{background:#fff;border:1px solid var(--card-border);border-radius:12px;padding:20px 24px;margin-bottom:20px}
+.audit-card h2{font-size:16px;margin-bottom:12px;color:var(--accent)}
+.audit-status{display:flex;align-items:center;gap:10px;font-size:14px;margin-bottom:12px}
+.audit-dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.audit-dot.ok{background:#22c55e}.audit-dot.bad{background:#ef4444}.audit-dot.pending{background:#f59e0b}
+.audit-meta{font-size:12px;color:#9ca3af;margin-top:4px}
+.audit-chains{display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-top:8px}
+.audit-chain-item{font-size:12px;padding:8px 12px;border-radius:8px;background:rgba(255,255,255,0.3);border:1px solid var(--card-border)}
+.audit-chain-item .name{color:#2c2c2c;font-weight:500}.audit-chain-item .st{float:right;font-size:11px}
+.audit-chain-item .st.good{color:#22c55e}.audit-chain-item .st.bad{color:#ef4444}
+</style>
+<script src="/static/auth.js"></script>
+<link rel="stylesheet" href="/static/shared.css">
+</head>
+<body>
+<div class="topbar">
+  <h1>📊 星枢<span>日报</span></h1>
+  <span style="font-size:12px;color:#9ca3af" id="report-date"></span>
+  <a href="/" class="btn" style="margin-left:auto">← 控制台</a>
+  <button class="btn btn-primary" onclick="loadReport()">🔄 刷新</button>
+</div>
+<div class="content" id="content">
+  <div class="loading">⏳ 生成日报中...</div>
+</div>
+
+<script>
+const API = window.location.origin;
+// P0: 统一 token 注入 — 所有 fetch 自动携带 Authorization，401 弹输入门
+const __dashFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.headers = DashAuth.authHeaders(opts.headers || {});
+  return __dashFetch(url, opts).then(function (r) {
+    if (r.status === 401) DashAuth.showGate();
+    return r;
+  });
+};
+
+
+async function loadReport() {
+  document.getElementById('content').innerHTML = '<div class="loading">⏳ 生成日报中...</div>';
+  try {
+    const r = await fetch(`${API}/api/v1/report/daily`);
+    const d = await r.json();
+    if (d.status !== 'ok') { document.getElementById('content').innerHTML = '<div class="loading">获取失败</div>'; return; }
+    const s = d.stats;
+    document.getElementById('report-date').textContent = s.date;
+
+    document.getElementById('content').innerHTML = `
+      <div class="summary-card">
+        <h2>🤖 AI 摘要</h2>
+        ${d.summary ? `<div class="ai-summary">${esc(d.summary)}</div>` : '<div class="no-ai">未配置 LLM，无法生成 AI 摘要。请在 ⚙️ 设置中配置 Hub Agent。</div>'}
+      </div>
+
+      <div class="stats-grid">
+        <div class="stat-card"><div class="num">${s.tasks.done}</div><div class="label">已完成任务</div><div class="sub">${s.tasks.failed} 失败 · ${s.tasks.active} 进行中</div></div>
+        <div class="stat-card"><div class="num">${s.memories}</div><div class="label">今日记忆</div></div>
+        <div class="stat-card"><div class="num">${s.disclosures.total}</div><div class="label">披露请求</div><div class="sub">${s.disclosures.pending} 待审批</div></div>
+        <div class="stat-card"><div class="num">${s.agents.online}/${s.agents.total}</div><div class="label">在线 Agent</div></div>
+      </div>
+
+      <div class="summary-card">
+        <h2>🏷️ 今日高频话题</h2>
+        ${s.top_tags && s.top_tags.length ? '<div class="tag-list">' + s.top_tags.map(t => `<span class="tag-item">${esc(t.tag)}<span class="cnt">${t.count}次</span></span>`).join('') + '</div>' : '<div class="no-ai">今日暂无数据</div>'}
+      </div>
+
+      <div class="summary-card">
+        <h2>📋 任务分布</h2>
+        <div class="tag-list">
+          ${Object.entries(s.tasks.by_status || {}).map(([k,v]) => `<span class="tag-item">${k}<span class="cnt">${v}</span></span>`).join('') || '无'}
+        </div>
+      </div>
+    `;
+  } catch(e) { document.getElementById('content').innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>'; }
+}
+
+// S2 契约：审计完整性卡片 — 每日自动校验一次（动作本身入审计，由 /api/audit/verify 记录）
+async function loadAuditCheck() {
+  const KEY = 'xingshu-audit-check-date';
+  const today = new Date().toISOString().slice(0, 10);
+  // 已有卡片则复用；否则插入到 stats-grid 之后
+  let card = document.getElementById('audit-card');
+  if (!card) {
+    const grid = document.querySelector('.stats-grid');
+    if (!grid) return;
+    card = document.createElement('div');
+    card.id = 'audit-card';
+    card.className = 'audit-card';
+    grid.insertAdjacentElement('afterend', card);
+  }
+  // 每日自动校验：今天已校验则直接显示缓存结果（localStorage），否则重新校验
+  const cached = localStorage.getItem(KEY);
+  if (cached === today) {
+    card.innerHTML = '<h2>🔒 审计完整性 <span class="audit-meta" style="float:right">今日已校验</span></h2>' + (localStorage.getItem('xingshu-audit-result') || '<div class="audit-meta">无记录</div>');
+    return;
+  }
+  card.innerHTML = '<h2>🔒 审计完整性</h2><div class="audit-status"><span class="audit-dot pending"></span>校验中...</div>';
+  try {
+    const r = await fetch(`${API}/api/audit/verify`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+    const d = await r.json();
+    const chains = d.chains || {};
+    const chainNames = {'audit_log':'主链 audit_log','disclosure_log':'披露链 disclosure_log','jsonl:memory_pool.jsonl':'记忆审计 jsonl','jsonl:transport.jsonl':'传输审计 jsonl'};
+    const items = Object.entries(chains).map(([k, v]) => {
+      const ok = v && v.valid !== false;
+      const detail = k.startsWith('jsonl') ? `窗口 ${v.windows}` : `校验 ${v.checked} 条`;
+      return `<div class="audit-chain-item"><span class="name">${esc(chainNames[k] || k)}</span><span class="st ${ok?'good':'bad'}">${ok?'✅':'❌'} ${esc(detail)}</span></div>`;
+    }).join('');
+    const fb = d.chains && d.chains.audit_log && d.chains.audit_log.first_bad_id;
+    const html = `<h2>🔒 审计完整性</h2>
+      <div class="audit-status"><span class="audit-dot ${d.valid?'ok':'bad'}"></span><b>${d.valid?'链完整':'链已破坏'}</b><span class="audit-meta">共校验 ${d.checked_total||0} 条</span></div>
+      ${d.valid?'':`<div class="audit-meta" style="color:#ef4444">异常定位 first_bad_id=${esc(fb||'?')}</div>`}
+      <div class="audit-chains">${items}</div>
+      <div class="audit-meta">校验动作本身已入审计</div>`;
+    card.innerHTML = html;
+    localStorage.setItem(KEY, today);
+    localStorage.setItem('xingshu-audit-result', html);
+  } catch(e) {
+    card.innerHTML = '<h2>🔒 审计完整性</h2><div class="audit-meta">校验失败: ' + esc(e.message) + '</div>';
+  }
+}
+
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+loadReport();
+loadAuditCheck();
+</script>
+</body>
+</html>

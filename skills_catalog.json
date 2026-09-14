@@ -1,0 +1,70 @@
+[
+  {
+    "id": "daily-standup", "name": "每日站会", "desc": "从记忆池和任务板生成每日站会报告", "category": "日常办公", "icon": "clipboard-list",
+    "example": "「生成今日站会报告」→ 汇总昨日+今日计划", "trigger": "每天 9:00", "content": "# 每日站会\n从记忆池提取24h完成事项，任务板取待处理。输出：昨日完成N项/今日计划M项/阻塞预警。推送通知。", "fileType": "MD"
+  },
+  {
+    "id": "weekly-report", "name": "周报生成", "desc": "自动汇总本周任务+记忆新增+关键指标", "category": "日常办公", "icon": "bar-chart-3",
+    "example": "「生成本周周报」→ 任务+记忆+趋势", "trigger": "每周五 17:00", "content": "# 周报\n本周概览/项目进展/下周计划/协调事项。写入记忆池+推送通知。", "fileType": "MD"
+  },
+  {
+    "id": "doc-summary", "name": "文档摘要", "desc": "读取 PDF/Word/网页并生成结构化摘要（要点/结论/行动项）", "category": "日常办公", "icon": "file-search",
+    "example": "「总结这份合同的关键条款」→ 金额/期限/违约/争议解决", "content": "# 文档摘要\n支持 PDF/Word/Markdown/网页。输出：TL;DR一句话/3-5个要点/风险项标红。长文档自动分段摘要再合并。", "fileType": "MD"
+  },
+  {
+    "id": "translate-proofread", "name": "翻译校对", "desc": "中英日韩互译 + 中文润色（去冗余/改语病/统一术语）", "category": "日常办公", "icon": "languages",
+    "example": "「把这段产品介绍译成英文并润色」→ 译文+修改标记", "content": "# 翻译校对\n翻译支持中英日韩。润色规则：去「进行」「相关」「等」冗余词/拆长句(>40字)/术语统一/主动语态。输出标修改处。", "fileType": "MD"
+  },
+  {
+    "id": "git-commit-msg", "name": "Git 提交信息", "desc": "分析 git diff 生成 Conventional Commits 格式消息", "category": "开发工具", "icon": "git-commit",
+    "example": "「生成提交信息」→ feat:/fix: 格式", "content": "# Git Commit\n读取 git diff，按 Conventional Commits 生成：feat/fix/refactor/docs/chore。自动补文件名和影响范围。", "fileType": "MD"
+  },
+  {
+    "id": "code-review", "name": "代码审查", "desc": "安全检查/性能审查/最佳实践，逐项打分+建议", "category": "开发工具", "icon": "file-check",
+    "example": "「审查最近的改动」→ 安全/命名/错误处理/测试", "content": "# 代码审查\n安全(SQL注入/XSS)/错误处理/命名/测试覆盖/性能(N+1)。每项PASS/FAIL+建议。", "fileType": "MD"
+  },
+  {
+    "id": "data-export", "name": "数据导出", "desc": "从记忆池/任务板导出 CSV/JSON，支持筛选排序", "category": "数据分析", "icon": "download",
+    "example": "「导出本周任务为 CSV」→ 生成文件", "content": "# 数据导出\n时间范围/状态筛选/排序。CSV/JSON格式，保存到桌面。", "fileType": "MD"
+  },
+  {
+    "id": "spreadsheet-ops", "name": "表格操作", "desc": "Excel/CSV 读写，公式计算，数据透视，图表", "category": "数据分析", "icon": "table",
+    "example": "「分析 sales.xlsx 月度趋势」→ 计算+图表", "content": "# 表格操作\nxlsx/csv/tsv读写。SUM/AVERAGE/VLOOKUP/透视表/柱状图。需 openpyxl(自动安装)。", "fileType": "MD"
+  },
+  {
+    "id": "data-clean", "name": "数据清洗", "desc": "去重/格式标准化/缺失值填充/异常值检测", "category": "数据分析", "icon": "sparkles",
+    "example": "「清洗 contacts.csv 去重+统一手机号格式」", "content": "# 数据清洗\n去重(多列组合键)/手机号/身份证/日期统一格式/缺失值均值或删除/异常值IQR检测。输出清洗报告。", "fileType": "MD"
+  },
+  {
+    "id": "email-draft", "name": "邮件草稿", "desc": "商务/通知/跟进多场景邮件生成，多语言", "category": "通信协作", "icon": "mail",
+    "example": "「给张总写项目延期说明邮件」→ 专业草稿", "content": "# 邮件草稿\n商务(正式)/通知(简洁)/跟进(推动行动)/多语言(中英日)。输出收件人+主题+正文。", "fileType": "MD"
+  },
+  {
+    "id": "meeting-notes", "name": "会议纪要", "desc": "从对话提取议题/结论/行动项/责任人", "category": "通信协作", "icon": "file-text",
+    "example": "「整理讨论生成会议纪要」→ 议题/行动项表", "content": "# 会议纪要\n主题/参与人/议题(背景+讨论+决议)/行动项(任务+责任人+截止)/下次时间。写入记忆池。", "fileType": "MD"
+  },
+  {
+    "id": "schedule-reminder", "name": "日程提醒", "desc": "从任务和记忆提取截止日期，生成今日日程+到期预警", "category": "日常办公", "icon": "calendar-clock",
+    "example": "「今天有什么要做的」→ 到期任务+今日日程排期", "trigger": "每天 8:00", "content": "# 日程提醒\n扫描任务到期日+记忆池待办。输出：上午/下午/晚上三段排期/今日到期预警(红色)/本周到期提醒(黄色)。推送通知。", "fileType": "MD"
+  },
+  {
+    "id": "notif-digest", "name": "通知摘要", "desc": "将积压通知按优先级聚合，生成可读摘要而非逐条轰炸", "category": "通信协作", "icon": "bell-ring",
+    "example": "「总结未读通知」→ 3条任务变更/1条披露请求", "trigger": "每小时", "content": "# 通知摘要\n按类型聚合(任务变更/披露请求/系统告警)/按优先级排序/去重同主题。输出≤5条摘要。", "fileType": "MD"
+  },
+  {
+    "id": "format-convert", "name": "格式转换", "desc": "Markdown↔DOCX、JSON↔CSV、图片转文字(OCR)", "category": "日常办公", "icon": "arrow-left-right",
+    "example": "「把 report.md 转成 Word」→ report.docx", "content": "# 格式转换\nMarkdown→DOCX(保留标题/表格/代码块)/JSON↔CSV/图片OCR(pytesseract)。输出保存同目录。", "fileType": "MD"
+  },
+  {
+    "id": "batch-rename", "name": "批量重命名", "desc": "按规则批量重命名文件（日期/序号/替换/正则）", "category": "日常办公", "icon": "file-input",
+    "example": "「把 IMG_* 改成 2026-07-28_001 格式」", "content": "# 批量重命名\n规则：日期前缀/序号补零/文本替换/正则匹配。支持预览(不实际改名)和回滚。操作前自动备份文件名清单。", "fileType": "MD"
+  },
+  {
+    "id": "backup-check", "name": "备份检查", "desc": "检查数据库和文件备份状态+完整性验证", "category": "安全运维", "icon": "shield-check",
+    "example": "「检查备份」→ 最近备份/大小/完整性", "trigger": "每天 2:00", "content": "# 备份检查\nSQLite备份(时间+大小+数量)/磁盘空间(余量+增长率)/校验和验证。异常推送告警。", "fileType": "MD"
+  },
+  {
+    "id": "audit-log", "name": "审计分析", "desc": "分析审计日志，检测异常操作模式", "category": "安全运维", "icon": "shield-alert",
+    "example": "「分析本周审计」→ 异常登录/批量删除/提权", "content": "# 审计分析\n异常登录/批量删除/提权尝试/敏感数据高频访问。生成安全周报，异常标红。", "fileType": "MD"
+  }
+]

@@ -1,0 +1,107 @@
+# ============================================================
+# 星枢 Sync Hub — 配置文件模板
+# ============================================================
+# 使用方法: 复制为 config/config.yaml 并修改
+#   cp config.example.yaml config/config.yaml
+# ============================================================
+
+# ---- 业务信息 ----
+business:
+  company_name: 企业              # 公司名称，影响 Agent 提示词中的称呼
+
+# ---- 认证 ----
+auth:
+  enabled: true                    # 是否启用 API Key 认证
+  hub_token: "CHANGE_ME_强随机值"   # 部署级单 token（P0 安全底线）：REST 门卫凭据，
+                                   # 所有 Agent/dashboard 共用；留空=仅 api_key 认证。
+  registration: open               # open=自注册 | guarded=受管(需配 hub_token,禁匿名注册)
+
+  # ── S1 身份接入（2026-08-05）──
+  # mode: local | ldap | oidc | hybrid
+  #   local  = 现有 api_key/hub_token 模式（默认，零迁移）
+  #   ldap   = AD 用户绑定 + 组同步（需 ldap3）
+  #   oidc   = 标准 JWT 验签（需 PyJWT + cryptography）
+  #   hybrid = 人走 OIDC、机器走 api_key（推荐企业过渡形态）
+  # 依赖/配置缺失时自动降级 local（fail-safe，不因身份接入崩启动）
+  mode: local
+  api_key_rotation_days: 90        # api_key 自动轮换周期（天）；0=不轮换
+  api_key_rotation_grace_hours: 24 # 轮换后旧 key 宽限期（小时），期内新旧并存
+  ldap:
+    url: ""                        # ldap://dc.corp.local 或 ldaps://
+    bind_dn: ""                    # 服务账号 DN（组同步用）
+    bind_password: ""
+    base_dn: ""                    # 用户搜索基 DN，如 DC=corp,DC=local
+    group_base_dn: ""              # 组搜索基 DN（缺省=base_dn）
+    group_sync_interval_sec: 900   # 组关系同步间隔（15 分钟）
+  oidc:
+    issuer: ""                     # https://idp.corp.local/realms/x
+    client_id: ""
+    jwks_url: ""                   # 缺省从 issuer 的 openid-configuration 自动发现
+                                   # 生成: python -c "import secrets; print(secrets.token_urlsafe(32))"
+                                   # 注意: 不得提交真实值到 git
+
+# ---- 数据库 ----
+database:
+  path: ./sync_hub.db             # SQLite 数据库文件路径
+  backup_enabled: true            # 是否启用自动备份
+  backup_interval_days: 7         # 备份保留天数（旧备份自动清理）
+  chroma_max_vectors: 50000       # 3-7: ChromaDB 集合向量数水位阈值（超过仅告警，不影响写入/检索）
+  # slow_query_ms: 200            # D-10: db 门面慢查询阈值毫秒（缺省 200；0 = 每次调用都记 WARNING，仅测试用）
+
+# ---- 共享工作区容量护栏（3-7, 2026-09-10）----
+workspace:
+  room_idle_ttl_sec: 1800         # 房间空闲卸载 TTL 秒；0 = 关闭清扫循环（kill switch）
+  sweep_interval_sec: 60          # 清扫周期秒
+  max_rooms: 200                  # 常驻 room 数水位阈值（跨越阈值打一次 WARNING，回落复位）
+
+# ---- 渐进式披露策略 ----
+disclosure:
+  department_peer_visibility: false  # 同部门 worker 能否互相看到摘要？
+  default_manager_level: summary     # 主管查看下属的默认披露级别 (metadata|summary|full)
+  orchestrator_max_level: full       # 调度者最高披露级别
+  allow_peer_disclosure: true        # 同任务协作成员能否互看摘要？
+
+# ---- 日志 ----
+logging:
+  level: info                      # 日志级别 (debug|info|warn|error)
+  keep_days: 30                    # 日志保留天数
+
+# ---- 服务器 ----
+server:
+  host: 127.0.0.1                  # 监听地址 (127.0.0.1=仅本机, 0.0.0.0=局域网)
+  port: 3060                       # 监听端口
+
+# XS-004: 审计锚定外发到外部介质(可选) — 不配/留空 = 默认休眠(本地文件仅快照)
+# audit:
+#   anchor_urls:            # 外部审计接收方,如另一台机器的收集端点/对象存储 webhook
+#     - "http://audit-host:9000/anchor"
+#   anchor_interval: 3600   # 推送周期秒; 0 = 仅启动时推一次
+
+# ---- P0 S4 暴露面收敛（2026-08-04）----
+# WS 首帧鉴权熔断：同 IP 窗口内失败 N 次 → 封禁 T 秒（防扫描器/爆破）
+ws:
+  auth_timeout_sec: 3.0            # 首帧鉴权超时（可配；禁止 <2.0s，否则触发重连风暴）
+  max_fails: 5                     # 窗口内失败次数阈值
+  fail_window_sec: 600             # 失败计数窗口（10 分钟）
+  ban_sec: 1800                    # 封禁时长（30 分钟）
+
+# REST 每 IP 限速（滑动窗口 1s）— 防误配置脚本打爆 Hub
+# 默认 1000 远高于 200 并发压测基线；设 0 关闭
+rate_limit:
+  per_ip: 1000
+
+# 联邦发现模式：multicast（默认，广播+多播）| static（静态清单，无 UDP 流量）
+# static 适合 UDP 被安全设备拦截的内网；节点清单格式：
+#   static_peers:
+#     - hub_id: zero-01
+#       hostname: hub-a
+#       ip: 192.168.1.10
+#       port: 3060
+federation:
+  discovery: multicast
+  # static_peers: []
+
+# ---- UI ----
+ui:
+  close_to_tray: true              # 关闭窗口是否最小化到托盘
+  start_minimized: false           # 启动时是否最小化

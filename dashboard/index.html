@@ -1,0 +1,994 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<link rel="icon" href="favicon.png">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>星枢 · Sync Hub</title>
+<link rel="stylesheet" href="/static/shared.css">
+<style>
+/* ── Dashboard 布局 ── */
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text);
+  font-size: var(--font-size);
+  line-height: var(--line-height);
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv01', 'ss03';
+  transition: background var(--transition-smooth), color var(--transition-smooth);
+}
+
+/* ── Header（玻璃态） ── */
+.header {
+  display: flex; align-items: center; padding: 10px var(--content-pad);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border-bottom: 1px solid var(--glass-border);
+  position: sticky; top: 0; z-index: 50;
+}
+.header::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background: var(--glass-shine); opacity: 0.5;
+}
+.header > * { position: relative; z-index: 1; }
+.header-left { display: flex; align-items: center; gap: 12px; }
+.header-right {
+  font-size: 13px; color: var(--text2);
+  display: flex; align-items: center; gap: 10px; margin-left: auto;
+}
+.logo { font-family: var(--font-display); font-size: 17px; font-weight: 700; }
+.logo span { color: var(--accent); font-weight: 400; }
+.online-count { font-size: 12px; color: var(--text3); }
+.header-link {
+  font-size: 12px; color: var(--text2); text-decoration: none;
+  padding: 5px 10px; border-radius: var(--radius-sm);
+  transition: all var(--transition-fast);
+}
+.header-link:hover { background: var(--accent-soft); color: var(--accent); }
+.time { font-size: 12px; color: var(--text3); }
+
+/* ── 主题切换 ── */
+.theme-toggle {
+  width: 28px; height: 28px; border-radius: 50%;
+  border: 1px solid var(--card-border);
+  background: var(--surface); color: var(--text2);
+  cursor: pointer; font-size: 14px; display: flex; align-items: center; justify-content: center;
+  transition: all var(--transition-fast);
+}
+.theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── 概要卡片网格 ── */
+.summary-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 14px; padding: 18px var(--content-pad);
+  max-width: 1400px; margin: 0 auto;
+}
+@media (max-width: 768px) { .summary-grid { grid-template-columns: repeat(2, 1fr); } }
+
+.summary-card {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+  text-align: center;
+  transition: transform var(--transition-fast), box-shadow var(--transition-fast), border-color var(--transition-fast);
+  cursor: default;
+  position: relative; overflow: hidden;
+}
+.summary-card::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background: var(--glass-shine);
+  border-radius: inherit;
+  opacity: 0.7;
+  transition: opacity 0.3s;
+}
+.summary-card > * { position: relative; z-index: 1; }
+.summary-card:hover {
+  transform: translateY(-3px);
+  box-shadow: var(--card-shadow-hover);
+  border-color: var(--glass-border-strong);
+}
+.summary-card:hover::before { opacity: 1; }
+.summary-card .num {
+  font-family: var(--font-display);
+  font-size: 30px; font-weight: 700;
+  color: var(--accent);
+  transition: color var(--transition-fast);
+}
+.summary-card .label {
+  font-size: 12px; color: var(--text3); margin-top: 4px;
+  font-weight: 500; letter-spacing: 0.3px;
+}
+
+/* ── 进度环卡片 ── */
+.summary-card.ring-card {
+  display: flex; align-items: center; gap: 16px; text-align: left;
+  padding: 14px 18px;
+}
+.ring-card .ring-wrap { flex-shrink: 0; }
+.ring-card .ring-info .num { font-size: 28px; }
+.ring-card .ring-info .label { margin-top: 2px; }
+
+/* ── 主内容区 ── */
+.container {
+  display: flex; gap: 14px; padding: 0 var(--content-pad) 16px;
+  max-width: 1400px; margin: 0 auto;
+}
+@media (max-width: 992px) { .container { flex-direction: column; } }
+
+.panel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  flex: 1; min-width: 0;
+  overflow: hidden;
+  box-shadow: var(--card-shadow);
+  position: relative;
+}
+.panel::before {
+  content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 0;
+  background: var(--glass-shine);
+  border-radius: inherit;
+  opacity: 0.6;
+}
+.panel > * { position: relative; z-index: 1; }
+.panel-header {
+  padding: 13px 18px; font-weight: 600;
+  border-bottom: 1px solid var(--glass-border);
+  font-size: 13px;
+  display: flex; align-items: center; gap: 8px;
+}
+.panel-body { max-height: 500px; overflow-y: auto; }
+
+/* ── Agent 列表 ── */
+.agent-card {
+  padding: 11px 18px;
+  border-bottom: 1px solid var(--glass-border);
+  cursor: pointer;
+  transition: background var(--transition-fast), border-left var(--transition-fast);
+  border-left: 3px solid transparent;
+}
+.agent-card:hover { background: var(--accent-soft); }
+.agent-card.active {
+  background: var(--accent-soft);
+  border-left-color: var(--accent);
+}
+.agent-row { display: flex; align-items: center; gap: 7px; }
+.agent-status { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+.agent-status.online { background: var(--green); box-shadow: 0 0 5px rgba(34,197,94,0.4); }
+.agent-status.offline { background: var(--red); }
+.agent-name { font-size: 12px; font-weight: 500; }
+.agent-role { font-size: 10px; padding: 2px 6px; border-radius: 20px; font-weight: 600; }
+.role-orch { background: var(--cold-soft); color: var(--cold); }
+.role-mgr { background: var(--accent-soft); color: var(--accent); }
+.role-wrk { background: var(--card-border); color: var(--text3); }
+.agent-dept { font-size: 10px; color: var(--text3); margin-left: auto; }
+.agent-memories { padding: 8px 0 0 20px; display: none; }
+.agent-card.active .agent-memories { display: block; }
+.mem-item { font-size: 11px; padding: 4px 0; border-bottom: 1px solid var(--glass-border); }
+.mem-level { font-size: 10px; padding: 2px 6px; border-radius: 20px; margin-right: 4px; font-weight: 500; }
+.level-s { background: rgba(234,179,8,0.1); color: var(--yellow); }
+.level-m { background: var(--card-border); color: var(--text3); }
+.level-f { background: rgba(34,197,94,0.1); color: var(--green); }
+
+/* ── 任务列表（斑马纹） ── */
+.task-item {
+  padding: 11px 18px; cursor: pointer;
+  transition: background var(--transition-fast), border-left var(--transition-fast), transform var(--transition-fast);
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--glass-border);
+}
+.task-item:nth-child(odd) { background: rgba(61,90,128,0.03); }
+[data-theme="dark"] .task-item:nth-child(odd) { background: rgba(61,90,128,0.12); }
+.task-item:nth-child(even) { background: transparent; }
+.task-item:hover {
+  background: var(--accent-soft) !important;
+  transform: translateX(2px);
+  box-shadow: 1px 2px 8px rgba(0,0,0,0.05);
+}
+.task-item.active {
+  background: var(--accent-soft) !important;
+  border-left-color: var(--accent);
+}
+.task-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.task-id { font-size: 11px; color: var(--text3); font-family: var(--font-mono); }
+.task-desc { font-size: 13px; margin-top: 2px; color: var(--text); }
+.task-status {
+  font-size: 10px; font-weight: 600; padding: 3px 10px;
+  border-radius: 20px; flex-shrink: 0; text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+.st-pending { background: var(--card-border); color: var(--text3); }
+.st-assigned { background: var(--accent-soft); color: var(--accent); }
+.st-in_progress { background: rgba(234,179,8,0.12); color: var(--yellow); }
+.st-completed { background: rgba(34,197,94,0.1); color: var(--green); }
+.st-failed { background: var(--neon-soft); color: var(--neon); }
+.st-cancelled { background: var(--card-border); color: var(--text3); text-decoration: line-through; }
+
+.task-actions { display: flex; gap: 6px; margin-top: 8px; }
+.task-btn {
+  font-size: 11px; font-weight: 500; padding: 4px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--card-border);
+  background: var(--surface); color: var(--text2);
+  cursor: pointer; transition: all var(--transition-fast);
+}
+.task-btn:hover { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.task-btn.danger:hover { background: var(--neon-soft); border-color: var(--neon); color: var(--neon); }
+.task-btn.success:hover { background: rgba(34,197,94,0.1); border-color: var(--green); color: var(--green); }
+.task-detail {
+  display: none; margin-top: 8px;
+  font-size: 12px; color: var(--text2); line-height: 1.6;
+}
+.task-item.active .task-detail { display: block; }
+
+/* ── 披露审计流 ── */
+.disc-item {
+  padding: 9px 18px; border-bottom: 1px solid var(--glass-border);
+  font-size: 12px; display: flex; align-items: center; gap: 8px;
+  transition: background var(--transition-fast);
+}
+.disc-item:hover { background: var(--accent-soft); }
+.disc-arrow { color: var(--text3); font-size: 11px; }
+.disc-reason {
+  color: var(--text2); font-size: 11px; flex: 1;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.disc-time { color: var(--text3); font-size: 11px; white-space: nowrap; }
+.disc-level { font-size: 10px; padding: 2px 7px; border-radius: 20px; font-weight: 600; }
+
+/* ── 披露审批 ── */
+.disc-req-item {
+  padding: 12px 18px; border-bottom: 1px solid var(--glass-border);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  transition: background var(--transition-fast);
+}
+.disc-req-item:hover { background: var(--accent-soft); }
+.disc-req-task { font-family: var(--font-mono); font-size: 11px; color: var(--accent); }
+.disc-req-agent { font-size: 12px; color: var(--text); }
+.disc-req-phase { font-size: 11px; color: var(--text3); }
+.disc-req-reason { font-size: 11px; color: var(--text2); flex: 1; }
+.disc-req-actions { display: flex; gap: 6px; }
+.disc-req-btn {
+  font-size: 11px; font-weight: 600; padding: 5px 14px;
+  border-radius: var(--radius-sm); border: none;
+  cursor: pointer; transition: all var(--transition-fast);
+}
+.disc-req-btn.approve { background: var(--accent); color: #fff; }
+.disc-req-btn.approve:hover { opacity: 0.85; transform: translateY(-1px); }
+.disc-req-btn.deny { background: var(--card-border); color: var(--text2); }
+.disc-req-btn.deny:hover { background: var(--neon); color: #fff; }
+
+/* ── 快捷操作悬浮按钮 ── */
+.quick-actions {
+  position: fixed; bottom: 24px; right: 24px; z-index: 100;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.qa-btn {
+  width: 44px; height: 44px; border-radius: 50%;
+  border: 1px solid var(--glass-border);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  color: var(--text);
+  font-size: 18px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: var(--card-shadow);
+  transition: all var(--transition-fast);
+}
+.qa-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--card-shadow-hover);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.qa-btn.qa-primary {
+  background: var(--accent); color: #fff; border-color: var(--accent);
+  width: 48px; height: 48px; font-size: 20px;
+}
+
+/* ── 骨架屏 ── */
+#skeleton {
+  position: fixed; inset: 0; background: var(--bg);
+  z-index: 999; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: 20px;
+  transition: opacity 0.3s;
+}
+#skeleton.fade-out { opacity: 0; pointer-events: none; }
+.skel-header {
+  width: 280px; height: 22px;
+  background: linear-gradient(90deg, var(--card-border) 25%, var(--card-hover) 50%, var(--card-border) 75%);
+  background-size: 200% 100%;
+  border-radius: var(--radius-sm);
+  animation: skeleton-shimmer 1.5s infinite;
+  margin-bottom: 8px;
+}
+.skel-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr);
+  gap: 14px; width: 640px;
+}
+.skel-card {
+  height: 80px;
+  background: linear-gradient(90deg, var(--card-border) 25%, var(--card-hover) 50%, var(--card-border) 75%);
+  background-size: 200% 100%;
+  border-radius: var(--radius);
+  animation: skeleton-shimmer 1.5s infinite;
+}
+.skel-panels { display: flex; gap: 14px; width: 860px; }
+.skel-panel {
+  flex: 1; height: 220px;
+  background: linear-gradient(90deg, var(--card-border) 25%, var(--card-hover) 50%, var(--card-border) 75%);
+  background-size: 200% 100%;
+  border-radius: var(--radius);
+  animation: skeleton-shimmer 1.5s infinite;
+}
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* ── Modal ── */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+  backdrop-filter: blur(4px);
+  z-index: 150; display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  background: var(--surface);
+  border-radius: var(--radius-lg);
+  max-width: 520px; width: 92%;
+  max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+  border: 1px solid var(--glass-border);
+}
+.modal-header {
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--glass-border);
+  display: flex; justify-content: space-between; align-items: center;
+}
+.modal-header h2 { font-family: var(--font-display); font-size: 16px; font-weight: 600; }
+.modal-close {
+  background: none; border: none; font-size: 18px;
+  cursor: pointer; color: var(--text3); padding: 4px 8px; border-radius: 6px;
+}
+.modal-close:hover { background: var(--card-border); color: var(--text); }
+.modal-body { padding: 20px; }
+.modal-section { margin-bottom: 20px; }
+.modal-section h3 { font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--text2); }
+
+/* ── 设置面板 ── */
+.lan-toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+.lan-toggle input { display: none; }
+.lan-slider {
+  width: 38px; height: 22px; background: var(--card-border);
+  border-radius: 22px; position: relative; transition: background 0.2s; flex-shrink: 0;
+}
+.lan-slider::after {
+  content: ''; position: absolute; top: 2px; left: 2px;
+  width: 18px; height: 18px; background: white;
+  border-radius: 50%; transition: transform 0.2s;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+}
+.lan-toggle input:checked + .lan-slider { background: var(--accent); }
+.lan-toggle input:checked + .lan-slider::after { transform: translateX(16px); }
+.lan-status { font-size: 11px; color: var(--text2); }
+
+.health-row { display: flex; justify-content: space-between; padding: 3px 0; font-size: 12px; }
+.health-label { color: var(--text2); }
+.health-value { color: var(--text); font-weight: 500; }
+.health-ok { color: var(--green); }
+.role-hint { font-size: 10px; color: var(--accent); }
+
+.viewer-role {
+  font-size: 11px; color: var(--cold);
+  background: var(--cold-soft); padding: 3px 10px; border-radius: 20px;
+  font-weight: 500;
+}
+
+.conn-badge {
+  font-size: 10px; padding: 3px 8px; border-radius: 20px; font-weight: 600;
+}
+.conn-ws { background: rgba(34,197,94,0.1); color: var(--green); }
+.conn-poll { background: var(--card-border); color: var(--text3); }
+
+.form-group { margin-bottom: 10px; }
+.form-group label {
+  display: block; font-size: 12px; color: var(--text2);
+  margin-bottom: 4px; font-weight: 500;
+}
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%; padding: 7px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text);
+  font-family: var(--font); font-size: 13px;
+  transition: border-color var(--transition-fast);
+  outline: none;
+}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+
+
+/* ── mimo 重设计把关落地（2026-08-06）─ 5 缺陷修复 ── */
+.header .seal {
+  width: 32px; height: 32px;
+  line-height: 28px;
+  font-size: 10px;
+  border-width: 1.5px;
+  border-radius: 3px;
+  margin-right: 0;
+  opacity: 0.9;
+}
+.header-left { gap: 10px; }
+.summary-grid {
+  gap: 24px;
+  padding: 40px 40px 24px;
+  margin-left: 32px;
+}
+.summary-card {
+  padding: 32px 24px;
+  background-color: #f7f3e9;
+  box-shadow: inset 0 0 0 1px rgba(212, 206, 192, 0.5) !important;
+}
+.summary-card .num {
+  font-weight: 700;
+  font-size: 38px;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+}
+.summary-card .label {
+  font-size: 13px;
+  color: #8a7f72;
+  margin-top: 8px;
+}
+.panel { background-color: rgba(247, 243, 233, 0.3); }
+.container { margin-left: 32px; }
+.header { padding: 14px 32px; }
+body::after { opacity: 0.35; right: -40px; bottom: -40px; }
+
+</style>
+<script src="/static/auth.js"></script>
+</head>
+<body>
+<div id="skeleton">
+  <div class="skel-header"></div>
+  <div class="skel-grid">
+    <div class="skel-card"></div><div class="skel-card"></div>
+    <div class="skel-card"></div><div class="skel-card"></div>
+  </div>
+  <div class="skel-panels">
+    <div class="skel-panel"></div><div class="skel-panel"></div>
+    <div class="skel-panel"></div><div class="skel-panel"></div>
+  </div>
+</div>
+
+<div id="firewall-warn" style="display:none;background:#fffbeb;color:#92400e;padding:6px 18px;font-size:12px;border-bottom:1px solid #fde68a;text-align:center">
+  ⚠️ Windows 防火墙可能未放行端口 3060。运行: <code style="background:#fef3c7;padding:1px 4px;border-radius:2px">netsh advfirewall firewall add rule name="Sync Hub 3060" dir=in action=allow protocol=TCP localport=3060</code>
+</div>
+<div class="header">
+  <div class="header-left">
+    <span class="status-dot"></span>
+    <span class="seal">枢</span>
+    <span class="logo">星枢 <span>Sync Hub</span></span>
+    <span class="online-count" id="header-online">— 在线</span>
+    <span class="conn-badge conn-poll" id="conn-badge">REST</span>
+  </div>
+  <div class="header-right">
+    <span class="viewer-role" id="viewer-role"></span>
+    <a href="/knowledge" class="header-link">🧠 知识图谱</a>
+    <a href="/chat" class="header-link">🤖 Hub Agent</a>
+    <a href="/report" class="header-link">📊 日报</a>
+    <a href="/team" class="header-link">👥 团队</a>
+    <button class="theme-toggle" id="theme-toggle" title="切换主题" onclick="toggleTheme()">🌙</button>
+    <a href="#" class="header-link" onclick="openSettings();return false">⚙️ 设置</a>
+    <span class="time" id="lan-ip" style="color:var(--accent);font-weight:600;margin-right:8px">🖥 获取中...</span>
+    <span class="time" id="header-time"></span>
+  </div>
+</div>
+
+<div class="summary-grid">
+  <div class="summary-card"><div class="num" id="m-online">0</div><div class="label">在线 Agent</div></div>
+  <div class="summary-card"><div class="num" id="m-mem">0</div><div class="label">记忆池</div></div>
+  <div class="summary-card"><div class="num" id="m-tasks">0</div><div class="label">任务 <span style="font-size:10px;color:var(--text3)" id="m-task-dist"></span></div></div>
+  <div class="summary-card"><div class="num" id="m-disc">0</div><div class="label">披露记录</div></div>
+</div>
+
+<div class="container">
+  <div class="panel">
+    <div class="panel-header">Agent 在线<span style="font-size:11px;color:var(--text3);font-weight:400" id="agent-count"></span></div>
+    <div class="panel-body" id="agent-list"><div class="empty-state">加载中...</div></div>
+  </div>
+  <div class="panel" id="disc-approval-panel" style="display:none">
+    <div class="panel-header">🔓 披露审批<span id="disc-req-badge" style="font-size:11px;color:#fff;background:var(--red);padding:1px 6px;border-radius:3px;margin-left:6px;font-weight:600">0</span></div>
+    <div class="panel-body" id="disc-req-list"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">任务流水线<span style="font-size:11px;color:var(--text3);font-weight:400" id="task-count"></span></div>
+    <div class="panel-body" id="task-list"><div class="empty-state">加载中...</div></div>
+  </div>
+  <div class="panel">
+    <div class="panel-header">📜 披露审计流<span style="font-size:11px;color:var(--text3);font-weight:400">实时</span></div>
+    <div class="panel-body" id="disc-list"><div class="empty-state">加载中...</div></div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<!-- 快捷操作悬浮按钮 -->
+<div class="quick-actions">
+  <button class="qa-btn" title="刷新" onclick="fetchData()">🔄</button>
+  <button class="qa-btn" title="新任务" onclick="openSettings()">📝</button>
+  <button class="qa-btn qa-primary" title="回到顶部" onclick="window.scrollTo({top:0,behavior:'smooth'})">⬆</button>
+</div>
+
+<!-- 设置模态框 -->
+<script>
+const API = window.location.origin;
+// P0: 统一 token 注入 — 所有 fetch 自动携带 Authorization，401 弹输入门
+const __dashFetch = window.fetch.bind(window);
+window.fetch = function (url, opts) {
+  opts = opts || {};
+  opts.headers = DashAuth.authHeaders(opts.headers || {});
+  return __dashFetch(url, opts).then(function (r) {
+    if (r.status === 401) DashAuth.showGate();
+    return r;
+  });
+};
+
+const params = new URLSearchParams(location.search);
+const API_KEY = params.get('api_key') || '';
+let ws = null, wsConnected = false;
+let viewerRole = '', viewerAgentId = '';
+let activeAgent = null, activeTask = null;
+
+async function identifyViewer() {
+  try {
+    const headers = API_KEY ? {'Authorization':`Bearer ${API_KEY}`} : {};
+    const r = await fetch(`${API}/api/v1/dashboard`, {headers});
+    const d = await r.json();
+    viewerRole = d.viewer_role || '';
+    viewerAgentId = d.viewer_agent_id || '';
+    document.getElementById('viewer-role').textContent = viewerRole ? viewerRole : '';
+  } catch(e) {}
+}
+
+function connectWS() {
+  // P1: 首帧鉴权（D3）——不再用 query param api_key
+  const url = `${API.replace('http','ws')}/ws/dashboard`;
+  ws = new WebSocket(url);
+  ws.onopen = () => {
+    wsConnected = true;
+    // P1: 连接后首帧发 auth
+    const token = DashAuth.getToken();
+    if (token) ws.send(JSON.stringify({type:'auth', token}));
+    const b = document.getElementById('conn-badge');
+    b.textContent = 'WS'; b.className = 'conn-badge conn-ws';
+  };
+  ws.onclose = (e) => { wsConnected = false; if (e && e.code === 4401) { DashAuth.showGate('鉴权失败：Hub 拒绝了连接令牌（4401）'); } setTimeout(connectWS, 3000); };
+  ws.onmessage = (e) => {
+    try {
+      const evt = JSON.parse(e.data);
+      switch(evt.msg_type || evt.type) {
+        case 'task_assigned': showToast('📋 新任务', evt.task_id); fetchData(); break;
+        case 'task_completed': showToast('✅ 任务完成', evt.task_id); fetchData(); break;
+        case 'task_failed': showToast('❌ 任务失败', evt.task_id); fetchData(); break;
+        case 'task_cancelled': showToast('🚫 任务取消', evt.task_id); fetchData(); break;
+        case 'disclosure_request': showToast('🔓 披露请求', `${evt.agent_id} 申请升级`); fetchData(); break;
+        case 'disclosure_approved': showToast('✓ 披露已批准', `${evt.agent_id} → Phase ${evt.new_phase}`); fetchData(); break;
+        case 'disclosure_denied': showToast('✕ 披露已拒绝', evt.agent_id); fetchData(); break;
+        case 'agent_online': fetchData(); break;
+        case 'agent_offline': showToast('🔴 Agent 掉线', evt.agent_id); fetchData(); break;
+        default: fetchData();
+      }
+    } catch(e) { fetchData(); }
+  };
+}
+
+function showToast(title, body) {
+  const c = document.getElementById('toasts');
+  const t = document.createElement('div');
+  t.className = 'toast';
+  t.innerHTML = `<div class="toast-title">${title}</div><div class="toast-body">${body}</div>`;
+  c.appendChild(t);
+  setTimeout(() => { t.classList.add('toast-exit'); setTimeout(() => t.remove(), 300); }, 4000);
+}
+
+async function fetchData() {
+  try {
+    const headers = API_KEY ? {'Authorization':`Bearer ${API_KEY}`} : {};
+    const r = await fetch(`${API}/api/v1/dashboard`, {headers});
+    const d = await r.json();
+    renderAll(d);
+  } catch(e) {}
+}
+
+async function renderAll(d) {
+  document.getElementById("skeleton")?.remove();
+  const online = d.agents.online, total = d.agents.total;
+  document.getElementById('header-online').textContent = `${online}/${total} 在线`;
+  document.getElementById('m-online').textContent = online;
+  document.getElementById('m-total').textContent = `/ ${total} Agent`;
+  document.getElementById('m-mem').textContent = d.memories.total;
+  document.getElementById('m-tasks').textContent = d.tasks.total;
+  document.getElementById('m-disc').textContent = d.disclosures.total;
+  if (d.tasks.by_status) {
+    document.getElementById('m-task-dist').textContent = Object.entries(d.tasks.by_status).filter(([,v])=>v>0).map(([k,v])=>`${k}:${v}`).join(' · ');
+  }
+  document.getElementById('header-time').textContent = new Date().toLocaleTimeString('zh-CN');
+
+  // LAN IP
+  try {
+    const h = await (await fetch(`${API}/health`)).json();
+    const net = h.network || {};
+    const ipEl = document.getElementById('lan-ip');
+    if (net.primary && net.primary !== '127.0.0.1') { ipEl.textContent = `🖥 ${net.primary}:3060`; }
+    else if (net.ips && net.ips.length) { ipEl.textContent = `🖥 ${net.ips[0]}:3060`; }
+    else { ipEl.textContent = '🖥 localhost:3060'; }
+    const fw = h.firewall || {};
+    if (fw.status === 'warning') { const wb = document.getElementById('firewall-warn'); if (wb) wb.style.display = ''; }
+    if (h.warnings && h.warnings.length) { h.warnings.forEach(w => showToast('⚠️ 告警', w)); }
+  } catch(e) {}
+
+  const discPanel = document.getElementById('disc-list').parentElement;
+  if (viewerRole === 'worker') {
+    discPanel.style.display = 'none';
+    const myTasks = (d.tasks.list || []).filter(t => t.assigned_agent_id === viewerAgentId);
+    document.getElementById('m-tasks').textContent = myTasks.length;
+    document.getElementById('task-count').textContent = `(${myTasks.length} · 我的任务)`;
+  } else {
+    discPanel.style.display = '';
+    document.getElementById('task-count').textContent = `(${(d.tasks.list||[]).length})`;
+  }
+  renderAgents(d.agents.list);
+  renderTasks(viewerRole === 'worker' ? (d.tasks.list||[]).filter(t => t.assigned_agent_id === viewerAgentId) : (d.tasks.list||[]));
+  renderDisclosures(d.disclosures.recent);
+  renderPendingDisclosures(d.pending_disclosures);
+}
+
+function renderAgents(agents) {
+  document.getElementById('agent-count').textContent = `(${agents.length})`;
+  const el = document.getElementById('agent-list');
+  const isOwn = (aid) => viewerRole==='worker' || viewerRole==='manager' ? aid===viewerAgentId : false;
+  el.innerHTML = agents.length ? agents.map(a => `
+    <div class="agent-card${activeAgent===a.agent_id?' active':''}" onclick="toggleAgent('${a.agent_id}')">
+      <div class="agent-row">
+        <span class="agent-status ${a.status}"></span>
+        <span class="agent-name">${a.agent_name||a.agent_id}${isOwn(a.agent_id)?' <span class="role-hint">👤</span>':''}</span>
+        <span class="agent-role ${a.role==='orchestrator'?'role-orch':a.role==='manager'?'role-mgr':'role-wrk'}">${a.role}</span>
+        ${a.department?`<span class="agent-dept">${a.department}</span>`:''}
+      </div>
+      <div class="agent-memories" id="mem-${a.agent_id}"><div style="color:var(--text3);font-size:11px;margin-bottom:4px">最近记忆：</div><div class="empty-state" style="padding:8px">点击展开查询...</div></div>
+    </div>`).join('') : '<div class="empty-state">暂无 Agent</div>';
+  if ((viewerRole==='manager'||viewerRole==='worker') && agents.length>1) {
+    el.querySelectorAll('.agent-card').forEach(card => {
+      if (card.querySelector('.agent-name') && card.querySelector('.agent-name').textContent.includes('👤')) {
+        card.style.background = 'var(--accent-soft)'; card.style.borderLeft = '3px solid var(--accent)';
+      }
+    });
+  }
+}
+
+async function toggleAgent(aid) {
+  if (activeAgent === aid) { activeAgent = null; renderAgents(window._lastAgents||[]); return; }
+  activeAgent = aid;
+  try {
+    const r = await fetch(`${API}/api/v1/memory/disclose`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({task_id:'dashboard-view', requester_agent_id:viewerAgentId||'electron-dashboard', target_agent_id:aid, query:'', required_level:'summary'})
+    });
+    const d = await r.json();
+    const memEl = document.getElementById(`mem-${aid}`);
+    if (memEl && d.memories) {
+      const lm = {metadata:'m',summary:'s',full:'f'};
+      memEl.innerHTML = d.memories.length ? d.memories.slice(0,5).map(m => `<div class="mem-item"><span class="mem-level level-${lm[m.disclosure_level]||'m'}">${m.disclosure_level}</span>${typeof m.content==='string'?m.content.slice(0,80):(m.tags||[]).join(', ')}</div>`).join('') : '<div class="empty-state" style="padding:8px">无记忆</div>';
+    }
+  } catch(e) {}
+  renderAgents(window._lastAgents||[]);
+}
+
+function renderTasks(tasks) {
+  const el = document.getElementById('task-list');
+  if (!tasks.length) { el.innerHTML = '<div class="empty-state">暂无任务</div>'; return; }
+  const labels = {pending:'待调度',assigned:'已分配',in_progress:'进行中',completed:'已完成',failed:'已失败',cancelled:'已取消'};
+  el.innerHTML = tasks.map(t => `
+    <div class="task-item${activeTask===t.task_id?' active':''}" onclick="toggleTask('${t.task_id}')">
+      <div class="task-header">
+        <div><div class="task-id">${t.task_id}</div><div class="task-desc">${t.description||''}</div></div>
+        <span class="task-status st-${t.status}">${labels[t.status]||t.status}</span>
+      </div>
+      <div class="task-detail">
+        创建者: ${t.creator_agent_id||'—'}<br>执行者: ${t.assigned_agent_id||'—'}<br>
+        阶段: ${t.current_phase||'—'} · 优先级: ${t.priority||'—'}<br>
+        ${t.result?`结果: ${t.result.slice(0,100)}`:''}
+        ${taskActions(t)}
+      </div>
+    </div>`).join('');
+}
+
+function taskActions(t) {
+  if (viewerRole === 'worker') return '';
+  let btns = '';
+  if (t.status === 'assigned') {
+    btns += `<button class="task-btn" onclick="event.stopPropagation();doTask('${t.task_id}','start')">▶ 开始</button>`;
+    btns += `<button class="task-btn danger" onclick="event.stopPropagation();doTask('${t.task_id}','cancel')">✕ 取消</button>`;
+  } else if (t.status === 'in_progress') {
+    btns += `<button class="task-btn success" onclick="event.stopPropagation();doTask('${t.task_id}','complete')">✓ 完成</button>`;
+    btns += `<button class="task-btn danger" onclick="event.stopPropagation();doTask('${t.task_id}','fail')">✕ 失败</button>`;
+    btns += `<button class="task-btn danger" onclick="event.stopPropagation();doTask('${t.task_id}','cancel')">取消</button>`;
+  }
+  return btns ? `<div class="task-actions">${btns}</div>` : '';
+}
+
+async function doTask(taskId, action) {
+  try {
+    const headers = {'Content-Type':'application/json'};
+    if (API_KEY) headers['Authorization'] = `Bearer ${API_KEY}`;
+    const r = await fetch(`${API}/api/v1/tasks/${taskId}/${action}?agent_id=${encodeURIComponent(viewerAgentId||'electron-dashboard')}`, {method:'POST', headers});
+    const d = await r.json();
+    if (r.ok) { showToast('✓ 操作成功', `${taskId} → ${action}`); fetchData(); }
+    else { showToast('✗ 失败', d.detail||d.status||''); }
+  } catch(e) { showToast('✗ 网络错误', e.message); }
+}
+
+function toggleTask(tid) { activeTask = activeTask===tid ? null : tid; fetchData(); }
+
+function renderDisclosures(discs) {
+  const el = document.getElementById('disc-list');
+  if (!discs.length) { el.innerHTML = '<div class="empty-state">暂无披露记录</div>'; return; }
+  el.innerHTML = discs.map(d => `
+    <div class="disc-item">
+      <span style="color:var(--accent)">${d.from}</span><span class="disc-arrow">→</span>
+      <span style="color:var(--purple)">${d.to}</span>
+      <span class="disc-level level-${d.level==='summary'?'s':d.level==='full'?'f':'m'}">${d.level}</span>
+      <span class="disc-reason">${d.reason||''}</span>
+      <span class="disc-time">${new Date(d.time).toLocaleTimeString('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}</span>
+    </div>`).join('');
+}
+
+function renderPendingDisclosures(requests) {
+  const panel = document.getElementById('disc-approval-panel');
+  const badge = document.getElementById('disc-req-badge');
+  const el = document.getElementById('disc-req-list');
+  if (viewerRole === 'worker') { panel.style.display = 'none'; return; }
+  const pending = requests || [];
+  badge.textContent = pending.length;
+  panel.style.display = pending.length ? '' : 'none';
+  if (!pending.length) { el.innerHTML = ''; return; }
+  el.innerHTML = pending.map(r => {
+    const auditBadge = (d) => {
+      if (!d || d==='None') return '';
+      const map = {approve:['✅ AI通过','color:#166534;background:#f0fdf4'],deny:['❌ AI拒绝','color:#991b1b;background:#fef2f2'],need_info:['⚠️ AI无法判断','color:#92400e;background:#fffbeb']};
+      const [label,style] = map[d]||['🤖 '+d,''];
+      return `<span style="font-size:10px;padding:2px 6px;border-radius:3px;font-weight:600;margin-left:4px;${style}">${label}</span>`;
+    };
+    return `<div class="disc-req-item">
+      <span class="disc-req-task">${r.task_id.slice(0,30)}</span>
+      <span class="disc-req-agent">👤 ${r.agent_id}</span>
+      <span class="disc-req-phase">→ Phase ${r.new_phase}</span>
+      ${r.audit_decision ? auditBadge(r.audit_decision) : ''}
+      <span class="disc-req-reason">${r.reason||'(无理由)'}</span>
+      ${r.audit_reason?`<span style="font-size:10px;color:var(--purple)">💬 ${r.audit_reason}</span>`:''}
+      <div class="disc-req-actions">
+        <button class="disc-req-btn approve" onclick="doDisclosureApprove('${r.request_id}')">✓ 批准</button>
+        <button class="disc-req-btn deny" onclick="doDisclosureDeny('${r.request_id}')">✕ 拒绝</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function doDisclosureApprove(requestId) {
+  try {
+    const approver = viewerAgentId || 'electron-dashboard';
+    const r = await fetch(`${API}/api/v1/disclosure/approve?request_id=${encodeURIComponent(requestId)}&approver_id=${encodeURIComponent(approver)}`, {method:'POST'});
+    const d = await r.json();
+    if (r.ok && d.status==='approved') { showToast('✓ 已批准', `披露升级 ${d.task_id}`); fetchData(); }
+    else { showToast('✗ 失败', d.error||''); }
+  } catch(e) { showToast('✗ 网络错误', e.message); }
+}
+
+async function doDisclosureDeny(requestId) {
+  try {
+    const approver = viewerAgentId || 'electron-dashboard';
+    const r = await fetch(`${API}/api/v1/disclosure/deny?request_id=${encodeURIComponent(requestId)}&approver_id=${encodeURIComponent(approver)}&deny_reason=店长拒绝`, {method:'POST'});
+    const d = await r.json();
+    if (r.ok && d.status==='denied') { showToast('✕ 已拒绝', d.task_id); fetchData(); }
+    else { showToast('✗ 失败', d.error||''); }
+  } catch(e) { showToast('✗ 网络错误', e.message); }
+}
+
+async function openSettings() {
+  loadHubAgentConfig();
+  loadServerConfig();
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.onclick = (e) => { if (e.target===overlay) overlay.remove(); };
+  let healthHtml = '<div class="health-row"><span class="health-label">加载中...</span></div>';
+  try {
+    const r = await fetch(`${API}/health`); const h = await r.json();
+    healthHtml = `
+      <div class="health-row"><span class="health-label">运行时长</span><span class="health-value">${Math.round(h.uptime_seconds)}s</span></div>
+      <div class="health-row"><span class="health-label">Agent 在线/总数</span><span class="health-value">${h.agents?.online}/${h.agents?.total}</span></div>
+      <div class="health-row"><span class="health-label">数据库</span><span class="health-value health-ok">${h.database?.status} · ${h.database?.size_mb}MB</span></div>
+      <div class="health-row"><span class="health-label">WAL 模式</span><span class="health-value">${h.database?.wal_mode}</span></div>
+      <div class="health-row"><span class="health-label">任务卡住(>1天)</span><span class="health-value">${h.tasks?.stale_tasks} 个</span></div>
+      <div class="health-row"><span class="health-label">内存池</span><span class="health-value">${h.memory_pool?.total} 条 (1h: ${h.memory_pool?.recent_1h})</span></div>
+      <div class="health-row"><span class="health-label">磁盘剩余</span><span class="health-value">${h.disk?.free_gb} GB</span></div>
+      <div class="health-row"><span class="health-label">ChromaDB</span><span class="health-value">${h.chromadb?.status} · ${h.chromadb?.documents} 文档</span></div>`;
+  } catch(e) { healthHtml = '<div class="health-row"><span class="health-label">获取失败</span></div>'; }
+
+  try {
+    const s = await (await fetch(`${API}/api/v1/maintenance/db-stats`)).json();
+    const rows = Object.entries(s).filter(([k])=>k!=='db_size_mb').map(([k,v])=>`${k}:${v}`).join(' · ');
+    healthHtml += `<div class="health-row"><span class="health-label">各表行数</span><span class="health-value" style="font-size:10px">${rows}</span></div>`;
+    healthHtml += `<div class="health-row"><span class="health-label">DB 大小</span><span class="health-value">${s.db_size_mb||'?'} MB</span></div>`;
+    healthHtml += `<div style="margin-top:8px"><button class="task-btn danger" onclick="doCleanup()" style="font-size:12px;padding:5px 14px">🧹 清理过期数据</button></div>`;
+  } catch(e) {}
+
+  overlay.innerHTML = `<div class="modal">
+    <div class="modal-header"><h2>⚙️ 设置</h2><button class="modal-close" onclick="this.closest('.modal-overlay').remove()">✕</button></div>
+    <div class="modal-body">
+      <div class="modal-section"><h3>系统健康</h3>${healthHtml}</div>
+      <div class="modal-section"><h3>连接</h3>
+        <div class="health-row"><span class="health-label">Hub 地址</span><span class="health-value">${API}</span></div>
+        <div class="health-row"><span class="health-label">WebSocket</span><span class="health-value">${wsConnected?'已连接':'轮询中'}</span></div>
+        <div class="health-row"><span class="health-label">当前角色</span><span class="health-value">${viewerRole} (${viewerAgentId||'未认证'})</span></div>
+        <div class="health-row" style="align-items:center;margin-top:10px;padding-top:10px;border-top:1px solid var(--border-light)">
+          <span class="health-label" style="font-weight:600">🌐 局域网访问</span>
+          <label class="lan-toggle" id="lanToggleLabel">
+            <input type="checkbox" id="lanToggle" onchange="toggleLan(this.checked)">
+            <span class="lan-slider"></span>
+            <span class="lan-status" id="lanStatus">检测中...</span>
+          </label>
+        </div>
+        <div id="lanNote" style="font-size:11px;color:var(--text3);margin-top:4px"></div>
+      </div>
+      <div class="modal-section">
+        <h3>🤖 Hub Agent (AI 引擎)</h3>
+        <div style="font-size:11px;color:var(--text3);margin-bottom:8px">配置 LLM 后可自动审计披露、补全知识、对话问答</div>
+        <div class="form-group"><label>Provider</label>
+          <select id="haProvider" onchange="toggleApiBase()" style="width:100%;background:var(--surface);border:1px solid var(--card-border);padding:5px 8px;border-radius:4px;font-size:12px;color:var(--text)">
+            <option value="deepseek">DeepSeek</option><option value="openai">OpenAI</option><option value="qianwen">通义千问</option><option value="zhipu">智谱</option><option value="minimax">MiniMax</option><option value="custom">自定义</option></select></div>
+        <div class="form-group"><label>API Key</label><input id="haApiKey" type="password" placeholder="sk-..." style="width:100%;background:var(--surface);border:1px solid var(--card-border);padding:5px 8px;border-radius:4px;font-size:12px;color:var(--text)"></div>
+        <div class="form-group" id="haApiBaseGroup" style="display:none"><label>API Base URL</label><input id="haApiBase" placeholder="https://api.openai.com/v1" style="width:100%;background:var(--surface);border:1px solid var(--card-border);padding:5px 8px;border-radius:4px;font-size:12px;color:var(--text)"></div>
+        <div class="form-group"><label>Model</label><input id="haModel" placeholder="deepseek-chat" style="width:100%;background:var(--surface);border:1px solid var(--card-border);padding:5px 8px;border-radius:4px;font-size:12px;color:var(--text)"></div>
+        <div class="form-group"><label>Temperature <span id="haTempVal" style="font-weight:400;color:var(--text3)">0.3</span></label><input id="haTemp" type="range" min="0" max="1" step="0.1" value="0.3" oninput="document.getElementById('haTempVal').textContent=this.value" style="width:100%"></div>
+        <div class="form-group"><label>披露审计规则</label><textarea id="haRules" rows="3" placeholder="AI 判断披露升级请求的规则..." style="width:100%;background:var(--surface);border:1px solid var(--card-border);padding:6px 8px;border-radius:4px;font-size:11px;color:var(--text);resize:vertical;font-family:inherit"></textarea></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="task-btn success" onclick="saveHubAgentConfig()" style="font-size:12px;padding:6px 16px">💾 保存</button>
+          <button class="task-btn" onclick="testHubAgent()" style="font-size:12px;padding:6px 16px">🔌 测试连接</button>
+          <span id="haStatus" style="font-size:11px;color:var(--text3)"></span>
+        </div>
+      </div>
+    </div>
+  </div>`;
+  document.body.appendChild(overlay);
+}
+
+async function loadHubAgentConfig() {
+  try {
+    const r = await fetch(`${API}/api/v1/hub-agent/config`); const c = await r.json();
+    document.getElementById('haProvider').value = c.provider||'deepseek';
+    document.getElementById('haModel').value = c.model||'deepseek-chat';
+    document.getElementById('haTemp').value = c.temperature||'0.3';
+    document.getElementById('haTempVal').textContent = c.temperature||'0.3';
+    document.getElementById('haApiBase').value = c.api_base||'';
+    document.getElementById('haRules').value = c.disclosure_rules||'';
+    toggleApiBase();
+    document.getElementById('haStatus').textContent = c.enabled==='true'?'🟢 已启用':'⚪ 未启用';
+  } catch(e) {}
+}
+
+function toggleApiBase() { document.getElementById('haApiBaseGroup').style.display = document.getElementById('haProvider').value==='custom'?'':'none'; }
+
+async function saveHubAgentConfig() {
+  try {
+    const r = await fetch(`${API}/api/v1/hub-agent/configure`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({provider:document.getElementById('haProvider').value, api_key:document.getElementById('haApiKey').value, api_base:document.getElementById('haApiBase').value, model:document.getElementById('haModel').value, temperature:parseFloat(document.getElementById('haTemp').value), enabled:!!document.getElementById('haApiKey').value, auto_approve:false})});
+    if ((await r.json()).status==='ok') {
+      if (document.getElementById('haRules').value) { await fetch(`${API}/api/v1/hub-agent/disclosure-rules`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({rules:document.getElementById('haRules').value})}); }
+      document.getElementById('haStatus').textContent = '🟢 已保存';
+      setTimeout(() => document.getElementById('haStatus').textContent = '🟢 已启用', 2000);
+    }
+  } catch(e) { document.getElementById('haStatus').textContent = '❌ 失败'; }
+}
+
+async function testHubAgent() {
+  document.getElementById('haStatus').textContent = '⏳ 测试中...';
+  try {
+    const r = await fetch(`${API}/api/v1/hub-agent/test`, {method:'POST'}); const d = await r.json();
+    document.getElementById('haStatus').textContent = d.status==='ok'?`✅ ${d.model} 连通`:`❌ ${(d.error||'').slice(0,40)}`;
+  } catch(e) { document.getElementById('haStatus').textContent = '❌ 网络错误'; }
+}
+
+async function doCleanup() {
+  try {
+    const r = await fetch(`${API}/api/v1/maintenance/cleanup`, {method:'POST'}); const d = await r.json();
+    showToast('🧹 清理完成', `释放 ${d.db_size_mb||'?'} MB`);
+    fetchData();
+  } catch(e) { showToast('✗ 清理失败', e.message); }
+}
+
+async function loadServerConfig() {
+  try {
+    const r = await fetch(`${API}/api/v1/server/config`); const c = await r.json();
+    const el = document.getElementById('lanToggle');
+    const st = document.getElementById('lanStatus');
+    const note = document.getElementById('lanNote');
+    if (el && st) {
+      el.checked = c.lan_enabled;
+      st.textContent = c.lan_enabled ? '🟢 已开启' : '⚪ 仅本机';
+      if (c.network && c.network.ips && c.network.ips.length) {
+        const ip = c.network.ips[0];
+        note.textContent = c.lan_enabled ? `局域网地址: http://${ip}:${c.port}` : '';
+      }
+    }
+  } catch(e) {}
+}
+
+async function toggleLan(enabled) {
+  const st = document.getElementById('lanStatus');
+  const note = document.getElementById('lanNote');
+  st.textContent = '⏳ 保存中...';
+  try {
+    const r = await fetch(`${API}/api/v1/server/config`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({lan_enabled:enabled})
+    });
+    const d = await r.json();
+    if (d.status === 'ok') {
+      st.textContent = enabled ? '🟢 已开启' : '⚪ 仅本机';
+      note.textContent = enabled
+        ? `✅ 已保存。${d.host==='0.0.0.0'?'重启 Hub 后局域网可访问 (端口 '+d.port+')':'需重启 Hub 生效'}`
+        : '✅ 已切换为仅本机。重启 Hub 后生效';
+      showToast(enabled?'🌐 局域网访问已开启':'🔒 已切换为仅本机', '重启 Hub 后生效');
+    }
+  } catch(e) {
+    st.textContent = '❌ 失败';
+    document.getElementById('lanToggle').checked = !enabled;
+  }
+}
+
+(async () => { await identifyViewer(); connectWS(); fetchData(); })();
+window._lastAgents = [];
+setInterval(fetchData, 10000);
+setInterval(() => { document.getElementById('header-time').textContent = new Date().toLocaleTimeString('zh-CN'); }, 30000);
+const origRenderAgents = renderAgents;
+renderAgents = (agents) => { window._lastAgents = agents; origRenderAgents(agents); };
+
+/* ── 主题切换（三档：light → dark → nature → light） ── */
+const THEMES = ['zen','light','dark','nature'];
+const THEME_ICONS = {zen:'売',light:'🌙',dark:'🌿',nature:'☀️'};
+const THEME_LABELS = {zen:'禅',light:'深色',dark:'自然',nature:'浅色'};
+function toggleTheme() {
+  const el = document.documentElement;
+  const btn = document.getElementById('theme-toggle');
+  const cur = THEMES.find(t => el.getAttribute('data-theme') === t) || 'light';
+  const next = THEMES[(THEMES.indexOf(cur) + 1) % THEMES.length];
+  el.setAttribute('data-theme', next);
+  btn.textContent = THEME_ICONS[next];
+  btn.title = '切换主题 (' + THEME_LABELS[next] + ')';
+  localStorage.setItem('xingshu-theme', next);
+}
+(function initTheme() {
+  const saved = localStorage.getItem('xingshu-theme') || 'zen';
+  document.documentElement.setAttribute('data-theme', saved);
+  const btn = document.getElementById('theme-toggle');
+  if (btn) { btn.textContent = THEME_ICONS[saved] || '🌙'; btn.title = '切换主题 (' + (THEME_LABELS[saved]||'深色') + ')'; }
+})();
+
+/* ── 骨架屏淡出 ── */
+function hideSkeleton() {
+  const skel = document.getElementById('skeleton');
+  if (skel) { skel.classList.add('fade-out'); setTimeout(() => { if (skel.parentNode) skel.remove(); }, 350); }
+}
+</script>
+</body>
+</html>
