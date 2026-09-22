@@ -29,7 +29,7 @@ const route = useRoute()
 const collapsed = ref(false)
 
 const icons = {
-  overview: '◉', activity: '≋', access: '⚿', disclosure: '◐', audit: '✓',
+  overview: '◉', activity: '≋', access: '⚿', provision: '⛨', disclosure: '◐', audit: '✓',
   knowledge: '◈', wiki: '✎', memory: '▣', ops: '⚙', integrations: '⇄', settings: '☰',
 }
 </script>

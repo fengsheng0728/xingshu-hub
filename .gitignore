@@ -67,6 +67,7 @@ wiki/concepts/memory-u4-*.md
 wiki/concepts/intg-dummy2-*.md
 wiki/concepts/intg-example-connector-*.md
 audit/anchor.txt
+audit/tsa/
 test-o1.db*
 test-s4.db*
 tests/p2-rerun-*.json
@@ -82,3 +83,9 @@ fix_*.py
 e2e_settings.py
 create_intro.js
 wiki/concepts/memory-e2e-secret.md
+corpus/.seed-report.json
+
+# CD-073（2026-09-21）：jsonl 是**运行产物**，不进版本库——否则 `git checkout -- audit`
+# 会把运行期增长段回退成旧提交版本，主链里的窗口锚就指向已不存在的内容
+# （实测 2026-09-21 transport.jsonl 窗口 w-5609-6608 丢失）。见 known_limitations L2-ANCHOR-002。
+audit/*.jsonl

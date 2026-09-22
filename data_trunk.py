@@ -42,8 +42,8 @@ def canonical_id_for(content: str) -> str:
 def synthesize_tags(source_tags, base: dict = None) -> dict:
     """打标快照合成 = 各来源取最严（只降不升，设计 §2.2）。
 
-    - level：min by _level_rank（disclosure.py:19 同口径秩 none<metadata<summary<full）
-    - trust：TRUST_ORDER 数值小者胜（复用 hub_core.py:320 _merge_trust 语义，只降不升）
+    - level：min by _level_rank（同 disclosure._level_rank 口径秩 none<metadata<summary<full）
+    - trust：TRUST_ORDER 数值小者胜（复用 hub_core._merge_trust 语义，只降不升）
     - taint：任一来源 tainted → 记最早 tainted_at（ISO 字符串字典序 = 时序）
     - locked：任一来源硬锁 → locked=True
     base：既有 canonical 快照；新来源并入时连 base 一起重算 min——只可能降，不可升。
@@ -184,7 +184,7 @@ class DataTrunk:
                         if b:
                             known.add(str(b))
         except Exception as _exc:
-            logger.debug("data_trunk silent-except @186: %s", _exc)
+            logger.debug("data_trunk silent-except(_known_branches): %s", _exc)
         return known
 
     # ── 分干 ──

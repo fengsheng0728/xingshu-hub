@@ -15,6 +15,7 @@ from routes_common import (
     NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
     _scope_client_ip, get_current_agent, get_current_agent_optional,
 )
+from routes_common import require_role  # CD-074（hub_token 放行的 canonical 角色门）
 
 router = APIRouter()
 
@@ -26,10 +27,7 @@ async def api_keys_create(request: Request, current_agent: str = Depends(get_cur
            "expires_at": str(可选, ISO)}
     返回: key_id + key(明文仅此一次)
     """
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可创建 scoped key")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可创建 scoped key")
     try:
         data = await request.json()
     except Exception:
@@ -37,7 +35,11 @@ async def api_keys_create(request: Request, current_agent: str = Depends(get_cur
     target = data.get("agent_id", "") or current_agent
     scope = data.get("scope") or {}
     expires = data.get("expires_at", "") or ""
-    from key_scopes import get_store
+    from key_scopes import get_store, validate_scope
+    _scope_err = validate_scope(scope)
+    if _scope_err:
+        # CD-069：scope 非法一律 400（不许静默剔除错值后按更宽语义签发）
+        raise HTTPException(status_code=400, detail=_scope_err)
     r = get_store().create(target, scope, created_by=current_agent, expires_at=expires)
     await hub._log_event("key_created", current_agent, {
         "key_id": r["key_id"], "agent_id": target, "scope": r["scope"]})
@@ -48,10 +50,7 @@ async def api_keys_create(request: Request, current_agent: str = Depends(get_cur
 @router.delete("/api/v1/keys/{key_id}")
 async def api_keys_revoke(key_id: str, current_agent: str = Depends(get_current_agent)):
     """吊销 scoped key（仅 manager/orchestrator）— 60s 内全端点失效"""
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可吊销 key")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可吊销 key")
     from key_scopes import get_store
     ok = get_store().revoke(key_id)
     if not ok:
@@ -63,10 +62,7 @@ async def api_keys_revoke(key_id: str, current_agent: str = Depends(get_current_
 @router.get("/api/v1/keys")
 async def api_keys_list(current_agent: str = Depends(get_current_agent)):
     """列 scoped keys（调用画像：last_used_at/call_count；仅 manager/orchestrator）"""
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可查看 keys")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可查看 keys")
     from key_scopes import get_store
     keys = get_store().list_keys()
     await hub._log_event("keys_listed", current_agent, {"count": len(keys)})

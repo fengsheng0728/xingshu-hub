@@ -23,6 +23,14 @@ from pycrdt.websocket import YRoom
 
 from models import CONFIG  # 3-7(2026-09-10): 容量护栏配置（TTL/水位阈值）
 
+# CD-070b（2026-09-20）：pycrdt 的 SQLiteYStore 把所有 room 写进**类属性** db_path
+# （默认 "ystore.db"，cwd 相对 → 仓库根），传入的 path 只作为 room 名记录。
+# 故这里接 CONFIG（空 = 沿用默认 "ystore.db"，生产行为零变化）；
+# 测试态由 conftest 指向 tmp，避免跑测试写生产 ystore.db。
+class _IsolatedSQLiteYStore(SQLiteYStore):
+    db_path = (CONFIG.WORKSPACE_YSTORE_PATH or "ystore.db")
+
+
 LOG = getLogger("shared_workspace")
 
 SHARED_DOCS_DDL = """
@@ -35,7 +43,10 @@ CREATE TABLE IF NOT EXISTS shared_docs (
     archived       INTEGER DEFAULT 0,
     block_count    INTEGER DEFAULT 0,
     visibility     TEXT DEFAULT 'team',
-    allowed_agents TEXT DEFAULT '[]'
+    allowed_agents TEXT DEFAULT '[]',
+    trust_level    TEXT NOT NULL DEFAULT 'internal',
+    source_agent_id TEXT DEFAULT '',
+    tainted_at     TEXT DEFAULT ''
 )
 """
 
@@ -107,7 +118,7 @@ class SharedWorkspace:
     async def _load_room(self, doc_id: str):
         """加载文档的 YRoom"""
         store_path = os.path.join(self.store_dir, f"{doc_id}.db")
-        ystore = SQLiteYStore(path=store_path)
+        ystore = _IsolatedSQLiteYStore(path=store_path)
         ydoc = Doc()
 
         room = YRoom(ydoc=ydoc, ystore=ystore, log=LOG)
@@ -389,7 +400,7 @@ class _FastAPIWSChannel:
         try:
             await self._ws.send_bytes(message)
         except Exception as _exc:
-            logger.warning("shared_workspace silent-except @304: %s", _exc)
+            logger.warning("shared_workspace silent-except(send): %s", _exc)
 
     async def recv(self) -> bytes:
         try:

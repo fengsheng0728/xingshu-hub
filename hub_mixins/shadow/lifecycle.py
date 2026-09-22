@@ -47,7 +47,7 @@ class LifecycleMixin:
         try:
             t.join(timeout=0)  # reap 死线程
         except Exception as _exc:
-            logger.debug("shadow silent-except @274: %s", _exc)
+            logger.debug("shadow silent-except(_watchdog_check): %s", _exc)
         if self._stop.is_set():
             # 与 stop() 竞态兜底：巡检中途收到停止信号则放弃重启
             return
@@ -82,7 +82,14 @@ class LifecycleMixin:
         INSERT 失败只记 stats 不阻塞，条目仍入队镜像（仅失去崩溃保护，D4 红线）。
         队内条目为 (kind, payload, pending_id)，pending_id=None 表示无 pending 行。
         """
-        if not self.enabled or not self._switches.get(kind):
+        # CD-047(L3): 开关跳过不再静默——计数观测（投递语义不变，仍零阻塞 no-op）
+        if not self.enabled:
+            self.stats["skipped_disabled"] = (
+                self.stats.get("skipped_disabled", 0) + 1)
+            return
+        if not self._switches.get(kind):
+            skipped = self.stats.setdefault("skipped_kind", {})
+            skipped[kind] = skipped.get(kind, 0) + 1
             return
         try:
             pending_id = self._pending_insert(kind, payload)
@@ -114,6 +121,7 @@ class LifecycleMixin:
                 self._pend_close()
         t = self._thread
         return {"enabled": self.enabled, "stats": dict(self.stats),
+                "switches": dict(self._switches),  # CD-047(L3): 各 kind 开关明细
                 "kind_count": dict(self._kind_count),
                 "queue_depth": self.queue_depth(),
                 "pending_incomplete": pending_incomplete,
@@ -126,11 +134,11 @@ class LifecycleMixin:
             from hub_mixins.notifications import shadow_alert
             shadow_alert(reason, detail)
         except Exception as _exc:
-            logger.warning("shadow silent-except @353: %s", _exc)
+            logger.warning("shadow silent-except(_alert): %s", _exc)
 
     def _alert_reset(self, reason: str):
         try:
             from hub_mixins.notifications import shadow_alert_reset
             shadow_alert_reset(reason)
         except Exception as _exc:
-            logger.warning("shadow silent-except @360: %s", _exc)
+            logger.warning("shadow silent-except(_alert_reset): %s", _exc)

@@ -4,7 +4,9 @@
 覆盖：
 1. 无 requester → 全量节点（向后兼容）
 2. requester=owner → 自己创建的节点可见
-3. requester 无权限（跨 Agent worker 无同任务）→ NONE 节点隐藏
+3. 已发布条目全员可见（语义随 CD-065 变更，2026-09-20 用户拍板：
+   知识库条目 = 已发布内容，图谱层 METADATA 级 id/标题/标签对任何认证主体
+   可见；原「跨 Agent worker 无同任务 → NONE 节点隐藏」三条断言随之翻转并加严）
 4. manager 查下属 → 可见
 """
 import json
@@ -83,31 +85,49 @@ def test_graph_no_requester_all_nodes(graph_env):
     assert "e-alice" in ids and "e-bob" in ids, f"无过滤应全量: {ids}"
 
 
-def test_graph_owner_sees_own(graph_env):
-    """alice 看图谱 → 自己的节点可见，bob 的隐藏（跨 Agent 无权限）。"""
+def test_n4_owner_sees_own_published_visible(graph_env):
+    """alice 看图谱 → 自己的节点可见；bob 的节点同样可见（已发布条目全员可见）。
+    语义随 CD-065 变更（2026-09-20 用户拍板）：原断言「e-bob 跨 Agent 无权限应隐藏」
+    按新口径翻转并加严 —— 不仅要求可见，还锁定全集/隐藏计数/节点只含 metadata 键。"""
     import asyncio
     hub = _make_hub(graph_env)
     r = asyncio.run(hub.knowledge_graph(requester="alice"))
     ids = {n["id"] for n in r["nodes"]}
     assert "e-alice" in ids, "owner 应看到自己的节点"
-    assert "e-bob" not in ids, f"跨 Agent 无权限应隐藏: {ids}"
+    assert "e-bob" in ids, f"已发布条目对任何认证主体可见（CD-065）: {ids}"
+    assert ids == {"e-alice", "e-bob"}, f"加严：节点全集应为两条已发布条目: {ids}"
+    assert r["hidden"] == 0, f"加严：已发布条目不应有隐藏计数: {r['hidden']}"
+    for n in r["nodes"]:
+        assert set(n) == {"id", "title", "category", "importance", "tags"}, \
+            f"加严：图谱节点只许 metadata 键（正文永不进图谱）: {sorted(n)}"
 
 
-def test_graph_manager_sees_subordinate(graph_env):
-    """manager1 管 alice → 看到 alice 的节点（r5 主管看下属）。"""
+def test_n4_manager_sees_subordinate_published_visible(graph_env):
+    """manager1 管 alice → 看到 alice 的节点（r5 主管看下属）；bob 的已发布条目
+    同样可见。语义随 CD-065 变更（2026-09-20 用户拍板）：原断言「manager 看不到
+    无关节点」按新口径翻转并加严。"""
     import asyncio
     hub = _make_hub(graph_env)
     r = asyncio.run(hub.knowledge_graph(requester="manager1"))
     ids = {n["id"] for n in r["nodes"]}
     assert "e-alice" in ids, "manager 应看到下属节点"
-    assert "e-bob" not in ids, "manager 看不到无关节点"
+    assert "e-bob" in ids, f"已发布条目对 manager 同样可见（CD-065）: {ids}"
+    assert ids == {"e-alice", "e-bob"}, f"加严：节点全集应为两条已发布条目: {ids}"
+    assert r["hidden"] == 0, f"加严：已发布条目不应有隐藏计数: {r['hidden']}"
 
 
-def test_graph_peer_no_visibility(graph_env):
-    """bob 查 → alice 的节点隐藏（worker×worker 不同部门无同任务 → NONE）。"""
+def test_n4_peer_published_visible(graph_env):
+    """bob 查 → alice 的已发布条目可见（CD-065：知识库条目 = 已发布内容，
+    图谱层 METADATA 级全员可见，正文仍走披露链不进图谱）。
+    语义随 CD-065 变更（2026-09-20 用户拍板）：原断言「bob 不应看到 alice 节点」
+    按新口径翻转并加严。"""
     import asyncio
     hub = _make_hub(graph_env)
     r = asyncio.run(hub.knowledge_graph(requester="bob"))
     ids = {n["id"] for n in r["nodes"]}
     assert "e-bob" in ids
-    assert "e-alice" not in ids, f"bob 不应看到 alice 节点: {ids}"
+    assert "e-alice" in ids, f"已发布条目对跨部门 worker 可见（CD-065）: {ids}"
+    assert ids == {"e-alice", "e-bob"}, f"加严：节点全集应为两条已发布条目: {ids}"
+    assert r["hidden"] == 0, f"加严：已发布条目不应有隐藏计数: {r['hidden']}"
+    node = next(n for n in r["nodes"] if n["id"] == "e-alice")
+    assert "content" not in node, "加严：正文永不进图谱"

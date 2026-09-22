@@ -187,7 +187,7 @@ window.fetch = function (url, opts) {
   }
 
   function loadInbox() {
-    api('/api/v1/wiki/inbox').then(function (d) {
+    api('/api/v1/wiki/inbox?limit=200')   // CD-043：分页，避免积压时一次拉数万行.then(function (d) {
       renderInbox(d.inbox || []);
     }).catch(function () {});
   }

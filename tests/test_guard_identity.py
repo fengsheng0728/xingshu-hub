@@ -193,6 +193,7 @@ EXPECTED_ROUTES = [
     "/api/v1/sessions/archive",
     "/api/v1/sessions/recent",
     "/api/v1/sessions/handoff",
+    "/api/v1/knowledge/reindex",
 ]
 
 EXPECTED_ROUTE_METHODS = {

@@ -55,11 +55,12 @@ def mem(owner="alice", level="summary", viewers=None):
 
 def test_rule_table_enumerable():
     rules = rule_table()
-    assert len(rules) == 10  # r1-r8 + r9_sensitivity_cap(H2) + r10_default_none
+    assert len(rules) == 11  # r1-r8 + r9_sensitivity_cap(H2) + r10_default_none
+    #                            + r4_published_public(CD-033A: 已发布内容链尾提升)
     ids = [r["id"] for r in rules]
-    assert len(set(ids)) == 10, "规则 ID 唯一"
-    # 优先级连续 1-10
-    assert [r["priority"] for r in rules] == list(range(1, 11))
+    assert len(set(ids)) == 11, "规则 ID 唯一"
+    # 优先级连续 1-11（r4_published_public 插在 r2b 之后）
+    assert [r["priority"] for r in rules] == list(range(1, 12))
 
 
 # ============ 2. 模拟器 vs 真实引擎镜像一致性 ============

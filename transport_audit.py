@@ -8,8 +8,15 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 
-AUDIT_DIR = "audit"
+try:
+    from models import CONFIG as _CONFIG   # CD-070b：产物根可配（env > config.yaml > 仓库内默认）
+except Exception:                          # 独立脚本场景：退回仓库内默认路径
+    _CONFIG = None
+# CD-070b（2026-09-20）：默认仍是 cwd 相对 "audit"（生产 cwd=仓库根，行为零变化）；
+# 测试态由 conftest 的 SYNC_HUB_AUDIT_DIR 指向 tmp。
+AUDIT_DIR = (_CONFIG.AUDIT_DIR if _CONFIG else "") or "audit"
 TRANSPORT_AUDIT_FILE = os.path.join(AUDIT_DIR, "transport.jsonl")
+
 
 # S2：jsonl 滚动链（窗口 hash 挂 audit_log 主链；DB 不可用静默跳过）
 _rolling_chain = None
@@ -70,7 +77,7 @@ def _fallback_local(entry: dict):
         with open(fallback, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
     except Exception as _exc:
-        logger.warning("transport_audit silent-except @69: %s", _exc)
+        logger.warning("transport_audit silent-except(_fallback_local): %s", _exc)
 
 
 def log_dispatch_out(envelope: dict):

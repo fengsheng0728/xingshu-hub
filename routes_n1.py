@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from models import CONFIG
 from hub_core import hub
 from routes_common import NO_AUTH, get_current_agent
+from routes_common import require_role  # CD-074（hub_token 放行的 canonical 角色门）
 
 router = APIRouter()
 
@@ -97,8 +98,12 @@ async def _execute_n1_delete(detail: dict) -> dict:
     elif ep == "team_members":
         await hub.remove_team_member(p.get("member_id"), p.get("owner", ""))
     elif ep == "chat_clear":
-        from hub_agent_lc import SQLiteChatHistory
-
+        # D-5 3-5a: langchain 缺失（未装向量栈）→ 明确降级响应，不抛 500 堆栈
+        try:
+            from hub_agent_lc import SQLiteChatHistory
+        except ImportError:
+            return {"status": "degraded", "endpoint": ep,
+                    "error": "LLM 栈未安装（langchain 缺失），请 pip install -r requirements-vector.txt"}
         SQLiteChatHistory(p.get("session_id", "default"), CONFIG.DB_PATH).clear()
     else:
         raise HTTPException(status_code=400, detail=f"未知 N1 删除端点: {ep}")
@@ -111,10 +116,7 @@ async def _execute_n1_delete(detail: dict) -> dict:
 async def api_n1_full_access(request: Request,
                              current_agent: str = Depends(get_current_agent)):
     """显式授权/收回全访问（manager+，入审计）。body: {agent_id, enabled, reason?}"""
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可授权全访问")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可授权全访问")
     try:
         data = await request.json()
     except Exception:
@@ -143,10 +145,7 @@ async def api_n1_full_access(request: Request,
 async def api_n1_reviews(status: str = "pending",
                          current_agent: str = Depends(get_current_agent)):
     """N1 删除审批队列（manager+）。query: ?status=pending|approved|rejected|空=全部"""
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可查看 N1 审批队列")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可查看 N1 审批队列")
     conn = hub._db()
     conn.row_factory = sqlite3.Row
     if status:
@@ -168,10 +167,7 @@ async def api_n1_review_decision(review_id: int, request: Request,
                                  current_agent: str = Depends(get_current_agent)):
     """N1 审批决策（manager+）。body: {decision: approved|rejected}
     approved → 执行 detail 中的删除动作；rejected → 拒绝（不执行）。"""
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可审批 N1")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可审批 N1")
     try:
         data = await request.json()
     except Exception:

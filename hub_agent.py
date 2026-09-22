@@ -297,13 +297,25 @@ class HubAgent:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
-    async def extract_knowledge_from_memories(self, limit: int = 10) -> dict:
-        """从记忆池中提取高频主题，建议生成知识条目"""
+    async def extract_knowledge_from_memories(self, limit: int = 10,
+                                              requester: str = "",
+                                              privileged: bool = False) -> dict:
+        """从记忆池中提取高频主题，建议生成知识条目。
+        CD-054(T19)：按主体过滤 —— privileged → 全员统计；非特权 → 只统计
+        owner_agent_id == requester 的记忆；requester 为空（无主体）→
+        fail-closed 返回空 suggestions 并记日志（不得全员统计）。"""
+        if not privileged and not requester:
+            logger.warning("extract_knowledge_from_memories: 无主体非特权调用，"
+                           "fail-closed 返回空 suggestions")
+            return {"status": "ok", "suggestions": []}
         conn = self._get_db()
         c = conn.cursor()
 
         # 统计高频标签（json.loads 解码 Unicode 转义）
-        c.execute("SELECT tags, content, owner_agent_id FROM memory_pool WHERE tags != '' AND tags IS NOT NULL")
+        if privileged:
+            c.execute("SELECT tags, content, owner_agent_id FROM memory_pool WHERE tags != '' AND tags IS NOT NULL")
+        else:
+            c.execute("SELECT tags, content, owner_agent_id FROM memory_pool WHERE tags != '' AND tags IS NOT NULL AND owner_agent_id = ?", (requester,))
         tag_counts = {}
         tag_samples = {}  # tag -> {content, agent_id}
         for row in c.fetchall():
@@ -317,7 +329,7 @@ class HubAgent:
                             "owner_agent_id": row["owner_agent_id"],
                         }
             except Exception as _exc:
-                logger.debug("hub_agent silent-except @316: %s", _exc)
+                logger.debug("hub_agent silent-except(extract_knowledge_from_memories): %s", _exc)
 
         # 取 TOP tags
         top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:limit]

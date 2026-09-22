@@ -26,6 +26,26 @@ router = APIRouter()
 _VALID_KINDS = ("semantic", "memory", "doc")
 
 
+# ============ CD-058：MCP 主体身份注入（contextvars） ============
+# FastMCP 1.26.0 工具是模块级函数，拿不到 request → 主体经 contextvar 同 task
+# 传播（call_tool 直调不过线程池，T20 探针实测确认）。helper 放本模块是为避免
+# routes.py ↔ mcp_server 循环导入（mcp_server 已函数内 import 本模块 _log_read）。
+import contextvars as _contextvars
+
+_mcp_principal_var: "_contextvars.ContextVar" = _contextvars.ContextVar(
+    "mcp_principal", default=None)
+
+
+def set_mcp_principal(principal) -> None:
+    """TokenAuthMiddleware 认证成功路径调用：把 Principal 注入 contextvar。"""
+    _mcp_principal_var.set(principal)
+
+
+def get_mcp_principal():
+    """MCP 工具读取当前请求主体；未注入（无认证上下文）→ None（fail-closed）。"""
+    return _mcp_principal_var.get()
+
+
 class GatewayReadRequest(BaseModel):
     kind: str = "semantic"
     query: str = ""
@@ -36,19 +56,25 @@ class GatewayReadRequest(BaseModel):
 
 
 def _log_read(requester: str, principal, kind: str, query: str, target: str,
-              granted_level: str, item_count: int, stripped: int) -> None:
-    """读审计落链：gateway_read_log 表 + events 事件。同步执行（调用方保证非热路径）。"""
+              granted_level: str, item_count: int, stripped: int,
+              auth_mode_override: str = "") -> None:
+    """读审计落链：gateway_read_log 表 + events 事件。同步执行（调用方保证非热路径）。
+
+    auth_mode_override（CD-054 甲，T15）：无主体调用方（如 MCP 工具，分辨不出
+    调用者身份）显式指定 auth_mode 落链；默认空串时沿用 principal.auth_mode，
+    默认路径行为与旧版逐字一致。"""
     import sqlite3
     from models import CONFIG
 
     scope_json = json.dumps(principal.scope if principal else None, ensure_ascii=False)
+    auth_mode = auth_mode_override or (getattr(principal, "auth_mode", "") if principal else "")
     try:
         conn = sqlite3.connect(CONFIG.DB_PATH)
         conn.execute(
             "INSERT INTO gateway_read_log (requester, auth_mode, scope_json, kind, query,"
             " target, granted_level, item_count, stripped_chunks)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (requester, getattr(principal, "auth_mode", "") if principal else "",
+            (requester, auth_mode,
              scope_json, kind, query[:200], target[:200],
              granted_level, item_count, stripped),
         )
@@ -56,6 +82,43 @@ def _log_read(requester: str, principal, kind: str, query: str, target: str,
         conn.close()
     except Exception:
         pass  # 读审计失败不阻塞读取（D4 可用性优先）
+
+
+def _log_deny(requester: str, principal, kind: str, query: str = "",
+              target: str = "", auth_mode_override: str = "") -> None:
+    """读被拒留痕（T18 · CD-059）：403/404 拒绝落 gateway_read_log，
+    granted_level="denied"、item_count=0、stripped_chunks=0；kind 沿用端点既有值。
+
+    auth_mode 只记类别（hub_token/api_key/anonymous-tool/空串），严禁凭据明文；
+    principal 兼容 Principal 对象或其 to_dict() 字典（TokenAuthMiddleware 注入
+    request.scope["principal"] 的是 dict）。query/target 沿用 [:200] 截断。
+    D4：审计失败不阻塞响应，但失败留 logger.warning 一行（含 kind/target/
+    异常类型，不含凭据）——禁止静默 pass。"""
+    import sqlite3
+    from models import CONFIG
+
+    try:
+        if isinstance(principal, dict):
+            scope = principal.get("scope")
+            auth_mode = auth_mode_override or principal.get("auth_mode", "")
+        else:
+            scope = principal.scope if principal else None
+            auth_mode = auth_mode_override or (
+                getattr(principal, "auth_mode", "") if principal else "")
+        conn = sqlite3.connect(CONFIG.DB_PATH)
+        conn.execute(
+            "INSERT INTO gateway_read_log (requester, auth_mode, scope_json, kind, query,"
+            " target, granted_level, item_count, stripped_chunks)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (requester, auth_mode,
+             json.dumps(scope, ensure_ascii=False), kind,
+             (query or "")[:200], (target or "")[:200], "denied", 0, 0),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as _exc:
+        logger.warning("_log_deny 落行失败 kind=%s target=%s err=%s",
+                       kind, str(target)[:80], type(_exc).__name__)
 
 
 # 条目 id 字段优先级（memory_id=记忆/语义，chunk_id=doc 段落，
@@ -97,7 +160,7 @@ def _attach_origin(items) -> None:
                     it["origin"] = origins[str(v)]
                     break
     except Exception as _exc:
-        logger.debug("routes_gateway silent-except @96: %s", _exc)
+        logger.debug("routes_gateway silent-except(_attach_origin): %s", _exc)
 
 
 @router.post("/api/v1/gateway/read")
@@ -174,6 +237,7 @@ async def api_gateway_read(
         ).fetchall()
         conn.close()
         if not chunks:
+            _log_deny(requester, principal, "doc", req.query, req.doc_id)
             raise HTTPException(status_code=404, detail="文档不存在或无分块")
 
         # requester 允许级别：disclose_for_principal 判定（用文档首 chunk 代表）

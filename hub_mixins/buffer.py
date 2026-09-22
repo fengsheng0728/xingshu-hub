@@ -170,7 +170,7 @@ class BufferMixin:
                             (now, round(latency_ms, 1), item[1].get("entry_id")))
                     conn2.commit()
             except Exception as _exc:
-                logger.debug("buffer silent-except @171: %s", _exc)
+                logger.debug("buffer silent-except(_batch_write_knowledge): %s", _exc)
 
             logger.debug(f"batch write: {len(batch)} items, {latency_ms:.1f}ms")
         except Exception as e:

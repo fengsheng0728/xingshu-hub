@@ -121,6 +121,9 @@ class HubTools:
     @tool
     def query_knowledge(self, query: str) -> str:
         """搜索企业知识库。输入：关键词。返回：匹配的知识条目。"""
+        # CD-052：本工具无主体上下文（LangChain 工具无 requester 参数）→
+        # 固定摘要级（fail-closed，content[:200] 即 CD-033A 摘要级精度），
+        # 不得放宽、不得加全文路径。返回体是纯 str，无结构可挂级别标记 → 仅注释。
         conn = self._get_db()
         c = conn.cursor()
         c.execute("SELECT title, content, category, tags FROM knowledge_base WHERE title LIKE ? OR content LIKE ? OR tags LIKE ? LIMIT 5", (f"%{query}%", f"%{query}%", f"%{query}%"))

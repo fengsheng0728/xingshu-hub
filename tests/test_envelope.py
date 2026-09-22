@@ -3,7 +3,7 @@ import pytest
 import json
 from envelope import (
     envelope_dispatch, envelope_result, envelope_ack, envelope_ping, envelope_pong,
-    envelope_hello, parse_envelope, is_legacy_flat, extract_payload,
+    envelope_hello, parse_envelope, extract_payload,
     serialize, deserialize, ENVELOPE_FIELDS, RESERVED_PAYLOAD_KEYS,
 )
 
@@ -91,23 +91,29 @@ class TestL0T2_SerializationRoundtrip:
         assert extract_payload(result)["last_checkpoint_id"] == "ckpt-42"
 
 
-class TestL0T3_LegacyDetection:
-    """L0-T3: 旧格式检测 + 兼容"""
+class TestL0T3_LegacyRejected:
+    """L0-T3: 平铺旧格式一律拒绝（兼容分支 2026-09-21 下线，CD-032 ——
+    方向裁决=自研 Agent 端砍掉、只放通用 API，该分支已无未来消费方）"""
 
-    def test_legacy_flat_detected(self):
+    def test_flat_format_rejected(self):
         legacy = {"type": "automation.run", "job_id": 1, "instruction": "test"}
-        assert is_legacy_flat(legacy)
         assert parse_envelope(legacy) is None
 
-    def test_v2_envelope_not_legacy(self):
+    def test_flat_with_version_1_rejected(self):
+        assert parse_envelope({"type": "push", "data": {}, "version": 1}) is None
+
+    def test_flat_heartbeat_rejected(self):
+        # 旧 Agent 的 heartbeat 平铺帧（原 compat 分支唯一放行形态）现同样丢弃
+        assert parse_envelope({"type": "heartbeat", "msg_type": "heartbeat"}) is None
+
+    def test_v2_envelope_accepted(self):
         env = envelope_dispatch({"event": "test"})
-        assert not is_legacy_flat(env)
         assert parse_envelope(env) is not None
 
-    def test_legacy_with_version_field(self):
-        legacy2 = {"type": "push", "data": {}, "version": 1}
-        assert is_legacy_flat(legacy2)
-        assert parse_envelope(legacy2) is None
+    def test_no_legacy_compat_symbol(self):
+        """兼容分支已下线，符号不得回归（回归即删错了实现）"""
+        import envelope as _env
+        assert not hasattr(_env, "is_" + "legacy_" + "flat")
 
 
 class TestL0T4_IdUniqueness:

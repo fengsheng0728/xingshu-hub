@@ -14,6 +14,7 @@ export const NAV = [
     group: '治理',
     items: [
       { path: '/access', name: 'access', title: '访问与权限 Access' },
+      { path: '/provision', name: 'provision', title: '身份供给 Provision' },
       { path: '/disclosure', name: 'disclosure', title: '披露治理 Disclosure' },
       { path: '/audit', name: 'audit', title: '审计中心 Audit' },
     ],

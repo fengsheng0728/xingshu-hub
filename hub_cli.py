@@ -294,7 +294,7 @@ def _api_key_expiry(now_iso: str) -> str:
         from models import CONFIG
         days = getattr(CONFIG, "API_KEY_ROTATION_DAYS", 90)
     except Exception as _exc:
-        logger.debug("hub_cli silent-except @293: %s", _exc)
+        logger.debug("hub_cli silent-except(_api_key_expiry): %s", _exc)
     if not days or days <= 0:
         return ""
     try:
@@ -365,7 +365,8 @@ def cmd_agent_create(agent_id: str, agent_name: str, role: str,
 # ================= key(B1: scoped key 签发, 2026-09-06) =================
 
 
-def _key_scope_from_flags(endpoints: str, data_domain: str, level_cap: str) -> dict:
+def _key_scope_from_flags(endpoints: str, data_domain: str, level_cap: str,
+                         methods: str = "") -> dict:
     """CLI scope 参数 → scope dict(空值省略; 与 _DEFAULT_SCOPE 的合并在 key_scopes.create 内)"""
     scope = {}
     eps = [e.strip() for e in (endpoints or "").split(",") if e.strip()]
@@ -376,11 +377,16 @@ def _key_scope_from_flags(endpoints: str, data_domain: str, level_cap: str) -> d
         scope["data_domain"] = dds
     if level_cap:
         scope["level_cap"] = level_cap
+    # CD-069：方法维度白名单（空 = 不限方法，既有口径零迁移）
+    ms = [m.strip().upper() for m in (methods or "").split(",") if m.strip()]
+    if ms:
+        scope["methods"] = ms
     return scope
 
 
 def cmd_key_create(agent_id: str, endpoints: str, data_domain: str,
-                   level_cap: str, expires: str, db_path: str) -> dict:
+                   level_cap: str, expires: str, db_path: str,
+                   methods: str = "") -> dict:
     """B1: 签发 scoped key(S1K)。agent 必须已预建(agent create)——key 绑定其身份,
     全权 api_key 仅管理员持有, 交付外部协作者的只有这张受限 key。明文仅此一次可见。
     创建者记 created_by='hub-cli'(与 REST /api/v1/keys 的 manager 门等价——
@@ -405,7 +411,8 @@ def cmd_key_create(agent_id: str, endpoints: str, data_domain: str,
     from key_scopes import get_store
     try:
         r = get_store(db_path).create(
-            agent_id, _key_scope_from_flags(endpoints, data_domain, level_cap),
+            agent_id, _key_scope_from_flags(endpoints, data_domain, level_cap,
+                                            methods),
             created_by="hub-cli", expires_at=expires)
     except sqlite3.OperationalError as e:
         return {"status": "error", "code": 500,
@@ -487,6 +494,9 @@ def main(argv=None):
                       help="数据域(department 标签), 逗号分隔（空=不限）")
     p_kc.add_argument("--level-cap", dest="level_cap", default="",
                       help="最高披露级别: full|summary|metadata|none（空=不设上限）")
+    p_kc.add_argument("--methods", default="",
+                      help="HTTP 方法白名单, 逗号分隔(如 GET,HEAD; 空=不限方法)——"
+                           "对外只读 key 用 GET,HEAD; 声明后按大写精确匹配, 未声明零迁移")
     p_kc.add_argument("--expires", default="",
                       help="过期时间 ISO 格式（可选, 默认不过期）")
     p_kc.add_argument("--db", default="", help="SQLite 路径（默认 CONFIG.DB_PATH）")
@@ -535,8 +545,16 @@ def main(argv=None):
                                   "detail": f"level_cap 非法: {args.level_cap} "
                                             f"(可选 full|summary|metadata|none)"}))
                 sys.exit(1)
+            from key_scopes import validate_scope as _validate_scope
+            # CD-069：方法与 level_cap 同级校验——非法值一律 400 退出（fail-closed）
+            _mverr = _validate_scope({"methods": args.methods})
+            if _mverr:
+                print(json.dumps({"status": "error", "code": 400,
+                                  "detail": _mverr}))
+                sys.exit(1)
             res = cmd_key_create(args.agent_id, args.endpoints, args.data_domain,
-                                 args.level_cap, args.expires, db_path)
+                                 args.level_cap, args.expires, db_path,
+                                 args.methods)
             # key 明文仅此一次可见(外部协作者凭据),随结果打印到 stdout
             print(json.dumps(res, ensure_ascii=False, indent=2))
             sys.exit(0 if res.get("status") == "created" else 1)

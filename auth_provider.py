@@ -75,6 +75,8 @@ class Principal:
     groups: List[str] = field(default_factory=list)
     auth_mode: str = "api_key"
     scope: Optional[dict] = None  # S1K scoped key 三层 scope（endpoints/data_domain/level_cap）
+    scoped_key_id: str = ""       # CD-069：非空 = 该主体来自 agent_keys（受限外部凭据）——
+                                  # 凭据/配置端点硬拒绝 + WS 默认拒绝（scope.ws=true 才放行）
 
     def to_dict(self) -> dict:
         return {
@@ -83,6 +85,7 @@ class Principal:
             "groups": self.groups,
             "auth_mode": self.auth_mode,
             "scope": self.scope,
+            "scoped_key_id": self.scoped_key_id,
         }
 
 
@@ -96,8 +99,13 @@ class AuthProviderUnavailable(Exception):
 class AuthProvider:
     mode = "local"
 
-    def authenticate(self, token: str, client_ip: str = "") -> Optional[Principal]:
-        """校验凭据，成功返回 Principal，失败返回 None。必须线程安全。"""
+    def authenticate(self, token: str, client_ip: str = "",
+                     touch: bool = True) -> Optional[Principal]:
+        """校验凭据，成功返回 Principal，失败返回 None。必须线程安全。
+
+        CD-072：`touch=False` 供「同一请求内的二次解析」用（依赖层在中间件已认证之后
+        还会再解析一次身份）——避免调用画像被重复计数（实测一次请求 call_count +2）。
+        """
         raise NotImplementedError
 
     def sync_groups(self) -> int:
@@ -166,7 +174,12 @@ class LocalProvider(AuthProvider):
         return {"endpoints": [], "data_domain": domain, "level_cap": tpl["level_cap"]}
 
     def _lookup_employee_by_key(self, token: str) -> Optional[dict]:
-        """按员工 key（SHA256 不存明文，同 S1K 规范）查 employee_accounts。"""
+        """按员工凭据查身份（CD-072 起走账本）。
+
+        顺序：① `employee_keys` 账本（可多把、含 status/过期判定、命中后挂 `_key_id`
+        供 authenticate 记调用画像）→ ② 回落 legacy `employee_accounts.key_hash`
+        （覆盖回填未跑的库与测试直插行）。明文不落库（SHA256）。
+        """
         try:
             conn = self._connect()
             try:
@@ -175,16 +188,38 @@ class LocalProvider(AuthProvider):
                 cols = {r[1] for r in c.fetchall()}
                 if "key_hash" not in cols:
                     return None  # 表未迁移, 员工认证不生效
-                import hashlib
-                h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                key_id = ""
+                emp_id = ""
+                _row = None
+                try:
+                    from employee_keys import get_store as _emp_key_store
+                    _row = _emp_key_store(self._config.DB_PATH).lookup_by_hash(token)
+                except Exception as _e:
+                    logger.warning("employee_keys lookup failed: %s", _e)
+                if _row:
+                    key_id = _row["key_id"]
+                    emp_id = _row["employee_id"]
+                else:
+                    # legacy 列回落（账本未命中：老库未回填 / 测试直插 key_hash）
+                    import hashlib
+                    h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                    r = c.execute(
+                        "SELECT employee_id FROM employee_accounts WHERE key_hash = ?",
+                        (h,)).fetchone()
+                    if not r:
+                        return None
+                    emp_id = r[0]
                 c.execute(
                     "SELECT employee_id, name, email, role_template, department,"
                     " project_scope, status, lease_expires_at FROM employee_accounts"
-                    " WHERE key_hash = ?",
-                    (h,),
-                )
+                    " WHERE employee_id = ?", (emp_id,))
                 row = c.fetchone()
-                return dict(row) if row else None
+                if not row:
+                    return None
+                d = dict(row)
+                if key_id:
+                    d["_key_id"] = key_id
+                return d
             finally:
                 conn.close()
         except Exception as e:
@@ -381,7 +416,8 @@ class LocalProvider(AuthProvider):
 
     # ---- 认证 ----
 
-    def authenticate(self, token: str, client_ip: str = "") -> Optional[Principal]:
+    def authenticate(self, token: str, client_ip: str = "",
+                     touch: bool = True) -> Optional[Principal]:
         if not token:
             return None
         # 1) api_key 路径（含 prev 宽限 key）
@@ -411,20 +447,23 @@ class LocalProvider(AuthProvider):
             # scoped key，guard_liveness 探针 5 语义）→ scope 附加。
             # 模式 B（sk- 独立认证，不依赖与 agents.api_key 相等）见下方顶层分支。
             _scope = None
+            _scoped_key_id = ""
             try:
                 from key_scopes import get_store as _key_store_a
                 _key_store_a = _key_store_a(self._config.DB_PATH)
                 _sk_a = _key_store_a.lookup_by_hash(token)
                 if _sk_a:
                     _scope = _sk_a["scope"]
+                    _scoped_key_id = _sk_a["key_id"]
                     try:
                         _key_store_a.touch(_sk_a["key_id"])
                     except Exception as _exc:
-                        logger.debug("auth_provider silent-except @365: %s", _exc)
+                        logger.debug("auth_provider silent-except(authenticate): %s", _exc)
             except Exception as _e:
                 logger.warning("S1K scoped key lookup failed: %s", _e)
             return Principal(subject_type="service", subject_id=agent_id,
-                             auth_mode="api_key", scope=_scope)
+                             auth_mode="api_key", scope=_scope,
+                             scoped_key_id=_scoped_key_id)
         # S1K scoped API key 模式 B（2026-09-06 B1）：agent_keys 顶层独立查询。
         # 原实现只有模式 A（挂在 agents.api_key 命中后），而签发流程从不把 sk- 随机串写回
         # agents.api_key → 纯 scoped key 实际永远 401。模式 B 让 key 不依赖 agents.api_key
@@ -444,7 +483,8 @@ class LocalProvider(AuthProvider):
             except Exception:
                 pass  # 调用画像失败不阻断认证
             return Principal(subject_type="service", subject_id=_sk_row["agent_id"],
-                             auth_mode="api_key", scope=_sk_row["scope"])
+                             auth_mode="api_key", scope=_sk_row["scope"],
+                             scoped_key_id=_sk_row["key_id"])
         # 1e 员工路径：agents 未命中 → employee_accounts(key_hash SHA256)
         emp = self._lookup_employee_by_key(token)
         if emp:
@@ -455,6 +495,14 @@ class LocalProvider(AuthProvider):
                 logger.warning("auth denied: employee %s lease expired", emp["employee_id"])
                 return None
             self._touch_last_used(emp["employee_id"])
+            # CD-072：账本命中时记该把凭据的调用画像（last_used_at / call_count）
+            _kid = (emp.get("_key_id") or "") if touch else ""
+            if _kid:
+                try:
+                    from employee_keys import get_store as _emp_key_store
+                    _emp_key_store(self._config.DB_PATH).touch(_kid)
+                except Exception:
+                    pass  # 画像失败不阻断认证
             return Principal(
                 subject_type="user", subject_id=emp["employee_id"],
                 auth_mode="api_key", scope=self._employee_scope(emp),
@@ -619,7 +667,8 @@ class LdapProvider(AuthProvider):
                             groups.append(g2dn)
         return groups
 
-    def authenticate(self, token: str, client_ip: str = "") -> Optional[Principal]:
+    def authenticate(self, token: str, client_ip: str = "",
+                     touch: bool = True) -> Optional[Principal]:
         """token 格式: "username:password"（绑定即认证）。"""
         if ":" not in token:
             return None
@@ -734,7 +783,8 @@ class OidcProvider(AuthProvider):
         self._jwks_fetched = time.time()
         return jwks
 
-    def authenticate(self, token: str, client_ip: str = "") -> Optional[Principal]:
+    def authenticate(self, token: str, client_ip: str = "",
+                     touch: bool = True) -> Optional[Principal]:
         """token = JWT（3 段）。验签 + 验 iss/aud/exp。"""
         if token.count(".") != 2:
             return None
@@ -814,17 +864,20 @@ class _HybridProvider(AuthProvider):
     def __init__(self, providers):
         self._providers = providers  # [(mode, provider), ...]
 
-    def authenticate(self, token: str, client_ip: str = "") -> Optional[Principal]:
+    def authenticate(self, token: str, client_ip: str = "",
+                     touch: bool = True) -> Optional[Principal]:
+        # CD-072：touch 必须透传给内层 provider —— 否则依赖层传的 touch=False 会被吞掉，
+        # 调用画像在「中间件 + 依赖」两次解析里各记一次（实测一次请求 call_count +2）。
         if _looks_like_jwt(token):
             for mode, p in self._providers:
                 if mode == "oidc":
-                    principal = p.authenticate(token, client_ip)
+                    principal = p.authenticate(token, client_ip, touch=touch)
                     if principal:
                         return principal
         # 非 JWT 或 OIDC 失败 → local 语义（api_key/hub_token）
         for mode, p in self._providers:
             if mode == "local":
-                return p.authenticate(token, client_ip)
+                return p.authenticate(token, client_ip, touch=touch)
         return None
 
     def rotate_keys(self) -> int:

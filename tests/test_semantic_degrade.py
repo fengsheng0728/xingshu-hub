@@ -28,8 +28,14 @@ hub_proc = None
 tmpdir = None
 
 
+_SAVED_ENV = {}
+
+
 def setup_module():
     global tmpdir
+    # CD-070b：先存原值，teardown 还原（禁止盲 pop，见 teardown_module 注释）
+    for _k in ("SYNC_HUB_CONFIG_DIR", "SYNC_HUB_CHROMA_PATH"):
+        _SAVED_ENV[_k] = os.environ.get(_k)
     tmpdir = tempfile.mkdtemp(prefix="p0-semdeg-")
     os.makedirs(os.path.join(tmpdir, "config"), exist_ok=True)
     with open(os.path.join(tmpdir, "config", "config.yaml"), "w", encoding="utf-8") as f:
@@ -50,8 +56,16 @@ def teardown_module():
         hub_proc.kill()
     if tmpdir:
         shutil.rmtree(tmpdir, ignore_errors=True)
-    os.environ.pop("SYNC_HUB_CONFIG_DIR", None)
-    os.environ.pop("SYNC_HUB_CHROMA_PATH", None)
+    # CD-070b：**不许盲 pop**。pytest 共享同一个 os.environ，盲 pop 会把 conftest 的
+    # 隔离覆盖（SYNC_HUB_CHROMA_PATH 等）从共享环境里摘掉，此后所有用例 spawn 的 Hub
+    # 子进程都回落仓库根 chroma（实测：本文件之后的 test_ws_auth_matrix /
+    # test_session_handoff 常驻 Hub 每 ~5.6s 写一次生产 chroma，持续 100s+）。
+    # 正确姿势＝保存原值再还原；原本没有的键才 pop。
+    for _k, _v in _SAVED_ENV.items():
+        if _v is None:
+            os.environ.pop(_k, None)
+        else:
+            os.environ[_k] = _v
 
 
 def start_hub():

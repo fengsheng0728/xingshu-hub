@@ -150,7 +150,9 @@ def hub_process():
         "server": {"host": "127.0.0.1", "port": HUB_PORT},
         "auth": {"enabled": True, "hub_token": HUB_TOKEN},
         "database": {"path": os.path.join(tmpdir, "test.db"),
-                     "backup_enabled": False},
+                     "backup_enabled": False,
+                     # CD-070b：显式给 chroma，不依赖继承 env（曾因上游 pop 回落仓库根）
+                     "chroma_path": os.path.join(tmpdir, "chroma_db")},
         "logging": {"level": "warning"},
     }
     with open(os.path.join(cfg_dir, "config.yaml"), "w", encoding="utf-8") as f:

@@ -331,7 +331,7 @@ async def automation_scheduler(hub):
                                    (job["id"],))
                         conn3.commit(); conn3.close()
                     except Exception as _exc:
-                        logger.warning("routes_automation silent-except @330: %s", _exc)
+                        logger.warning("routes_automation silent-except(automation_scheduler): %s", _exc)
                     continue
 
                 payload_type = job.get("payload_type", "instruction")
@@ -386,9 +386,9 @@ async def automation_scheduler(hub):
                             (next_run, job["id"]))
                     conn2.commit(); conn2.close()
                 except Exception as _exc:
-                    logger.warning("routes_automation silent-except @385: %s", _exc)
+                    logger.warning("routes_automation silent-except(automation_scheduler): %s", _exc)
 
         except Exception as _exc:
-            logger.debug("routes_automation silent-except @388: %s", _exc)
+            logger.debug("routes_automation silent-except(automation_scheduler): %s", _exc)
 
         await asyncio.sleep(TICK_INTERVAL)

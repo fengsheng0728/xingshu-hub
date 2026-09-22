@@ -31,6 +31,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import socket
 import sqlite3
 import threading
@@ -101,7 +102,11 @@ class AuditChain:
             conn = sqlite3.connect(self._db_path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA busy_timeout = 5000")
-            conn.execute("PRAGMA synchronous = NORMAL")  # WAL + NORMAL：降 fsync 开销
+            # CD-034 R2（2026-09-17 用户拍板）：审计连接改 FULL —— 断电/内核崩溃下
+            # NORMAL 可能丢「上次 checkpoint 之后」的一段尾，且链前缀自洽导致本地校验
+            # 查不出（只有外部锚能检出）。审计是低频写，fsync 代价可接受；
+            # 注意此处不动 db.py 的全局热路径连接。回退 = 把本行改回 NORMAL。
+            conn.execute("PRAGMA synchronous = FULL")
             self._local.conn = conn
         return conn
 
@@ -479,7 +484,7 @@ class JsonlRollingChain:
                 os.replace(self._file_path, dst)
                 self._count = 0  # 新文件行号从 1 重计
         except Exception as _exc:
-            logger.warning("audit_chain silent-except @481: %s", _exc)
+            logger.warning("audit_chain silent-except(_rotate_if_needed): %s", _exc)
 
     def _file_segments(self) -> List[tuple]:
         """CD-022: [(path, lines)] 归档(ts 升序,旧→新)+ 主文件(末位)。
@@ -497,11 +502,35 @@ class JsonlRollingChain:
                 with open(p, "r", encoding="utf-8", errors="replace") as f:
                     segs.append((p, f.readlines()))
             except Exception as _exc:
-                logger.warning("audit_chain silent-except @499: %s", _exc)
+                logger.warning("audit_chain silent-except(_file_segments): %s", _exc)
         if os.path.exists(self._file_path):
             with open(self._file_path, "r", encoding="utf-8", errors="replace") as f:
                 segs.append((self._file_path, f.readlines()))
         return segs
+
+    def _declared_gaps(self) -> set:
+        """已声明缺口的窗口 id 集合（CD-073）。
+
+        主链里的 `anchor_gap` 事件 = 「这一段内容确实丢了，原因与范围已上链」。
+        声明过的窗口不再算**未解释**断点，但会在 `declared_gaps` 里如实列出——
+        目的是让「断链」有确定含义，而不是把缺口藏起来。**不改历史、不补内容。**
+        """
+        out = set()
+        try:
+            conn = _conn(self._db_path)
+        except Exception:
+            return out
+        try:
+            try:
+                rows = conn.execute(
+                    "SELECT ref_id FROM audit_log WHERE entry_type='anchor_gap'"
+                    " AND ref_table=?", (self._ref_table,)).fetchall()
+                out = {r["ref_id"] for r in rows if r["ref_id"]}
+            except Exception:
+                out = set()
+        finally:
+            conn.close()
+        return out
 
     def verify_windows(self) -> Dict:
         """重算全部 jsonl 窗口 hash 与 audit_log anchor 对比。
@@ -556,7 +585,16 @@ class JsonlRollingChain:
                 if h != payload.get("window_hash"):
                     bad.append({"anchor_id": r["log_id"], "reason": "hash_mismatch",
                                 "lines": f"{s}-{e}"})
-            return {"valid": len(bad) == 0, "windows": len(rows), "bad_windows": bad}
+            declared = self._declared_gaps()
+            declared_hits, undeclared = [], []
+            for b in bad:
+                _lines = b.get("lines") or ""
+                if _lines and f"w-{_lines}" in declared:
+                    declared_hits.append({**b, "declared": True})
+                else:
+                    undeclared.append(b)
+            return {"valid": len(undeclared) == 0, "windows": len(rows),
+                    "bad_windows": undeclared, "declared_gaps": declared_hits}
         finally:
             conn.close()
 
@@ -589,7 +627,15 @@ def current_chain_head(db_path: str) -> str:
 # XS-004 已落地 HTTP webhook 外发：链头 hash POST 到配置的外部接收方（另一台机器/
 # 审计服务器/对象存储 webhook）；本地 audit/anchor.txt 仅是快照，外部介质才是链尾
 # 锚定真相（攻击者能改库就能顺手重写本地锚文件，本地文件不构成防链尾重写）。
-_ANCHOR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit", "anchor.txt")
+try:
+    from models import CONFIG as _CONFIG   # CD-070b：产物根可配（env > config.yaml > 仓库内默认）
+except Exception:                          # 独立脚本场景：退回仓库内默认路径
+    _CONFIG = None
+# CD-070b（2026-09-20）：审计产物根统一到 _AUDIT_DIR（env SYNC_HUB_AUDIT_DIR > config audit.dir > 仓库内 audit/）。
+_AUDIT_DIR = (_CONFIG.AUDIT_DIR if _CONFIG else "") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "audit")
+_ANCHOR_FILE = os.path.join(_AUDIT_DIR, "anchor.txt")
+
 
 
 def export_anchor(db_path: str, webhook_urls: Optional[List[str]] = None,
@@ -665,6 +711,189 @@ def verify_anchor(db_path: str) -> Dict:
     match = anchored == row["entry_hash"]
     return {"valid": match, "checked": 1, "chain_tail": row["entry_hash"],
             "anchored": anchored, "first_bad_id": None if match else "tail"}
+
+
+# ── CD-034 R3：链头外部时间戳（RFC3161 TSA）盖章 + 回拉比对 ──
+# 为什么：本地 audit/anchor.txt 与链同机同目录，有本机写权限者可同时改链与锚（循环论证）。
+# 权威时间证据必须来自信任域之外——公共 RFC3161 时间戳服务（免费）或自建 TSA。
+# 语义要点：链头随每次写入变化，故判据不是「当前链头 == 盖章值」，而是
+# 「被盖章的那个链头节点仍存在于链中」（见 tests/test_audit_tsa.py T4/T5）。
+TSA_DIR = os.path.join(_AUDIT_DIR, "tsa")   # CD-070b：跟随 _AUDIT_DIR（SYNC_HUB_TSA_DIR 仍优先）
+
+# 免费公共 RFC3161 时间戳服务（2026-09-20 实测可达，返回 ~6KB 真 token）。
+# 换自建/RFC3161 商用 TSA 只需改 config audit.tsa.url。
+DEFAULT_TSA_URL = "https://rfc3161.ai.moda/"
+_TSA_INDEX_LOCK = threading.Lock()
+
+
+def _der_len(n: int) -> bytes:
+    """DER 长度编码（短/长形式）。"""
+    if n < 0x80:
+        return bytes([n])
+    out = b""
+    while n:
+        out = bytes([n & 0xFF]) + out
+        n >>= 8
+    return bytes([0x80 | len(out)]) + out
+
+
+def _der(tag: int, content: bytes) -> bytes:
+    """DER TLV 编码。"""
+    return bytes([tag]) + _der_len(len(content)) + content
+
+
+def _der_int(value: int) -> bytes:
+    """DER INTEGER（正数最小长度 + 高位补零防负数）。"""
+    if value == 0:
+        return _der(0x02, b"\x00")
+    body = value.to_bytes((value.bit_length() + 7) // 8, "big")
+    if body[0] & 0x80:
+        body = b"\x00" + body
+    return _der(0x02, body)
+
+
+def build_tsa_query(imprint_hex: str) -> bytes:
+    """构造 RFC3161 TimeStampReq（DER）：version=v1 + SHA-256 messageImprint
+    + certReq=TRUE + 随机 nonce。手写 DER 是为了零依赖（不引入 asn1crypto/rsa 等）。
+    """
+    digest = bytes.fromhex(imprint_hex)
+    if len(digest) != 32:
+        raise ValueError("imprint 必须是 SHA-256(32 字节) hex")
+    sha256_algid = bytes.fromhex("300d06096086480165030402010500")  # SEQUENCE{OID, NULL}
+    message_imprint = _der(0x30, sha256_algid + _der(0x04, digest))
+    body = _der_int(1)                    # version v1
+    body += message_imprint
+    # RFC3161 TimeStampReq 字段序：version, messageImprint, [reqPolicy], nonce,
+    # [certReq], [extensions] —— certReq 必须排在 nonce 之后，写成对调的顺序会被
+    # TSA 判为 Invalid TimeStampReq（2026-09-20 用 openssl ts -query 对照才发现，
+    # 本机 openssl 生成的 tsq 即 nonce→certReq 顺序）。
+    body += _der_int(secrets.randbits(63) or 1)  # nonce（防重放/防串答复）
+    body += _der(0x01, b"\xff")           # certReq TRUE（要 TSA 附证书）
+    return _der(0x30, body)
+
+
+def _append_tsa_index(out_dir: str, rec: Dict) -> None:
+    """盖章记录追加到 index.jsonl（含失败记录——失败也要留痕）。"""
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+        with _TSA_INDEX_LOCK:
+            with open(os.path.join(out_dir, "index.jsonl"), "a",
+                      encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception as e:
+        logger.warning("tsa index 写入失败（不阻塞）: %s", e)
+
+
+def tsa_out_dir(out_dir: str = "") -> str:
+    """盖章目录解析：显式入参 > SYNC_HUB_TSA_DIR 环境变量 > 仓库内 audit/tsa。
+
+    env 覆盖是测试/多实例隔离用的（生产一个 Hub 一个库一个目录，不必设）。
+    """
+    return out_dir or os.environ.get("SYNC_HUB_TSA_DIR") or TSA_DIR
+
+
+def tsa_stamp(db_path: str, tsa_url: str, out_dir: str = "", timeout: int = 10,
+              hub_name: str = "") -> Dict:
+    """对当前链头做 RFC3161 时间戳盖章。返回 {status, anchor, imprint, tsq, tsr, ...}。
+
+    失败绝不抛（审计路径不阻塞主链路），逐次留痕到 index.jsonl。
+    """
+    anchor = current_chain_head(db_path) or ""
+    if not anchor or anchor == GENESIS:
+        return {"status": "error", "anchor": anchor, "error": "主链为空", "tsa_url": tsa_url}
+    imprint = hashlib.sha256(anchor.encode("utf-8")).hexdigest()
+    out_dir = tsa_out_dir(out_dir)
+    _now_utc = datetime.now(timezone.utc)
+    base = os.path.join(out_dir, f"{_now_utc.strftime('%Y%m%dT%H%M%SZ')}_{anchor[:8]}")
+    result: Dict = {
+        "anchor": anchor, "imprint": imprint, "tsa_url": tsa_url,
+        "tsq": base + ".tsq", "tsr": base + ".tsr",
+        "stamped_at": _now_utc.isoformat(), "hub": hub_name or socket.gethostname(),
+    }
+    try:
+        query = build_tsa_query(imprint)
+        req = urllib.request.Request(
+            tsa_url, data=query,
+            headers={"Content-Type": "application/timestamp-query",
+                     "Accept": "application/timestamp-reply"})
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            token = resp.read()
+        if not token:
+            raise RuntimeError("TSA 返回空 token")
+        os.makedirs(out_dir, exist_ok=True)
+        with open(result["tsq"], "wb") as f:
+            f.write(query)
+        with open(result["tsr"], "wb") as f:
+            f.write(token)
+        result["status"] = "ok"
+        result["bytes"] = len(token)
+        # 廉价自洽检查：token 里应含我们提交的 imprint（真签名验证需 TSA CA 证书）
+        result["token_has_imprint"] = bytes.fromhex(imprint) in token
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = f"{type(e).__name__}: {e}"[:300]
+        _append_tsa_index(out_dir, result)
+        return result
+    _append_tsa_index(out_dir, result)
+    return result
+
+
+def verify_tsa(db_path: str, out_dir: str = "") -> Dict:
+    """回拉比对：逐条盖章记录检查「被盖章的链头节点是否仍在链中」。
+
+    - 节点在链中 → 该时间点之后链未被整段重写（链正常增长不算不一致）
+    - 节点不在链中 → 判定整段重写/截断，返回 mismatches（调用方据此告警）
+    - imprint 与 anchor 不自洽 → index 被手改，同样报不一致
+    """
+    out_dir = tsa_out_dir(out_dir)
+    idx = os.path.join(out_dir, "index.jsonl")
+    if not os.path.isfile(idx):
+        return {"valid": True, "checked": 0, "mismatches": [], "out_dir": out_dir,
+                "note": "无盖章记录（TSA 未启用或尚未盖章）"}
+    mismatches: List[Dict] = []
+    checked = 0
+    try:
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+    except Exception as e:
+        return {"valid": False, "checked": 0, "mismatches": [
+            {"reason": "db_unavailable", "detail": str(e)[:200]}], "out_dir": out_dir}
+    try:
+        with open(idx, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue  # 坏行跳过（不因一行脏数据判整链无效）
+                if rec.get("status") != "ok":
+                    continue
+                anchor = rec.get("anchor") or ""
+                if not anchor:
+                    continue
+                checked += 1
+                if rec.get("imprint") != hashlib.sha256(anchor.encode("utf-8")).hexdigest():
+                    mismatches.append({"anchor": anchor[:16],
+                                       "stamped_at": rec.get("stamped_at"),
+                                       "reason": "imprint_mismatch（盖章记录被篡改）",
+                                       "tsr": rec.get("tsr")})
+                    continue
+                hit = conn.execute(
+                    "SELECT log_id FROM audit_log WHERE entry_hash = ? LIMIT 1",
+                    (anchor,)).fetchone()
+                if not hit:
+                    mismatches.append({
+                        "anchor": anchor[:16],
+                        "stamped_at": rec.get("stamped_at"),
+                        "reason": "anchored_head_missing_from_chain（链被整段重写或截断）",
+                        "tsr": rec.get("tsr"),
+                    })
+    finally:
+        conn.close()
+    return {"valid": not mismatches, "checked": checked,
+            "mismatches": mismatches, "out_dir": out_dir}
 
 
 def verify_all(db_path: str, jsonl_files: Dict[str, str],

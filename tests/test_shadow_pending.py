@@ -176,11 +176,12 @@ def test_replay_idempotent_no_dup_index(tmp_path):
     assert w.dt.branch_repo().read_at(f"vault/memory/{_DATE}/i1.md") is not None
 
 
-# ⑦ db.py 正式迁移：SCHEMA_VERSION=6 建 shadow_pending + user_version 同步
+# ⑦ db.py 正式迁移：shadow_pending 随正式迁移建表 + user_version 同步
+# （原断言 SCHEMA_VERSION==6；CD-045 把版本推进到 7——event_outbox——故同步为 7）
 def test_schema_v6_shadow_pending_migration():
     import models
     from db import SCHEMA_VERSION
-    assert SCHEMA_VERSION == 6, "db.py SCHEMA_VERSION 应为 6"
+    assert SCHEMA_VERSION == 7, "db.py SCHEMA_VERSION 应为 7"
     tmp = tempfile.mkdtemp(prefix="g1-")
     db = os.path.join(tmp, "t.db")
     old = models.CONFIG.DB_PATH
@@ -193,7 +194,7 @@ def test_schema_v6_shadow_pending_migration():
         ver = conn.execute("PRAGMA user_version").fetchone()[0]
         cols = [r[1] for r in conn.execute("PRAGMA table_info(shadow_pending)")]
         conn.close()
-        assert ver == 6, f"user_version {ver} 应 == 6"
+        assert ver == 7, f"user_version {ver} 应 == 7"
         for col in ("id", "kind", "payload", "created_at", "status", "attempts"):
             assert col in cols, f"shadow_pending 缺列 {col}"
         dbmod.init_db()  # 幂等：再跑一次不崩

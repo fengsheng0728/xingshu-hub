@@ -14,7 +14,9 @@ from notifications import notifications
 from routes_common import (
     NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
     _scope_client_ip, get_current_agent, get_current_agent_optional,
+    require_ops_privilege, log_ops_trigger,
 )
+from routes_common import require_role  # CD-074（hub_token 放行的 canonical 角色门）
 
 router = APIRouter()
 
@@ -82,13 +84,20 @@ async def api_chunks_reclassify(
 
     body: {"doc_id": str(可选，空=全量重判)}
     返回: changed + details
+    CD-061：重运维统一门（worker → 403）+ 成功触发落 ops_trigger 审计。
     """
+    await require_ops_privilege(request, "/api/v1/chunks/reclassify", current_agent)
     try:
         data = await request.json()
     except Exception:
         data = {}
     doc_id = data.get("doc_id", "") or ""
-    return await hub.reclassify_chunks(doc_id=doc_id, requester=current_agent)
+    result = await hub.reclassify_chunks(doc_id=doc_id, requester=current_agent)
+    changed = result.get("changed") if isinstance(result, dict) else None
+    await log_ops_trigger("/api/v1/chunks/reclassify", current_agent,
+                          {"changed": changed if changed is not None
+                           else "unavailable: 返回体缺 changed 键"})
+    return result
 
 
 @router.post("/api/v1/embeddings/rebuild")
@@ -100,13 +109,22 @@ async def api_embeddings_rebuild(
 
     body: {"batch_size": int(可选, 默认100)}
     返回: provider/target_dim/rebuilt_mem/stale_total
+    CD-061：重运维统一门（worker → 403）+ 成功触发落 ops_trigger 审计。
     """
+    await require_ops_privilege(request, "/api/v1/embeddings/rebuild", current_agent)
     try:
         data = await request.json()
     except Exception:
         data = {}
     batch_size = int(data.get("batch_size", 100) or 100)
-    return await hub.rebuild_embeddings(requester=current_agent, batch_size=batch_size)
+    result = await hub.rebuild_embeddings(requester=current_agent, batch_size=batch_size)
+    if isinstance(result, dict) and result.get("status") == "ok":
+        counts = {"rebuilt_mem": result.get("rebuilt_mem"),
+                  "stale_total": result.get("stale_total")}
+    else:
+        counts = "unavailable: 重建未成功完成（见返回体 status/detail）"
+    await log_ops_trigger("/api/v1/embeddings/rebuild", current_agent, counts)
+    return result
 
 
 @router.post("/api/v1/embeddings/calibrate")
@@ -118,7 +136,9 @@ async def api_embeddings_calibrate(
 
     body: {"samples": [str, ...]} — 至少 2 段代表语料
     返回: p10/p25/p50/suggested（建议阈值 = P25）
+    CD-061：重运维统一门（worker → 403）+ 成功触发落 ops_trigger 审计。
     """
+    await require_ops_privilege(request, "/api/v1/embeddings/calibrate", current_agent)
     try:
         data = await request.json()
     except Exception:
@@ -138,6 +158,8 @@ async def api_embeddings_calibrate(
         raise HTTPException(500, f"模型加载失败: {e}")
     result = calibrate_cos_threshold(model, samples)
     result["provider"] = provider
+    await log_ops_trigger("/api/v1/embeddings/calibrate", current_agent,
+                          {"checked": len(samples)})
     return result
 
 
@@ -149,10 +171,7 @@ async def api_sensitivity_words(
 
     返回: {"words": [...], "source": "dir|file|default", "count": N}
     """
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可查看机密词库")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可查看机密词库")
     from sensitivity import _load_secret_keywords, _SECRET_WORDS_DIR, _SECRET_WORDS_FILE
     words = _load_secret_keywords()
     source = "dir" if (_SECRET_WORDS_DIR and os.path.isdir(_SECRET_WORDS_DIR)) else (
@@ -171,10 +190,7 @@ async def api_sensitivity_words_reload(
     body: {"reclassify": bool(可选, 默认true)} — 重载后是否全量重判定存量 chunk
     返回: {"words": N, "source": "...", "reclassified": {changed, ...} | "skipped"}
     """
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可更新机密词库")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可更新机密词库")
     try:
         data = await request.json()
     except Exception:
@@ -202,10 +218,7 @@ async def api_entity_review_list(
 
     query: ?status=pending|approved|rejected|（空=全部）
     """
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可查看实体审查队列")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可查看实体审查队列")
     return await hub.list_entity_reviews(status=status or "")
 
 
@@ -220,10 +233,7 @@ async def api_entity_review_decision(
     body: {"decision": "approved"|"rejected"}
     approved → 进 knowledge_base（图谱节点，N4 披露过滤自动生效）
     """
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可审查实体")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail="仅主管/店长可审查实体")
     try:
         data = await request.json()
     except Exception:

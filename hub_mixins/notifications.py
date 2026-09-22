@@ -218,7 +218,7 @@ def shadow_alert(reason: str, detail: str = "", threshold=None,
             try:
                 fn(reason, detail)
             except Exception as _exc:
-                logger.warning("notifications silent-except @226: %s", _exc)
+                logger.warning("notifications silent-except(shadow_alert): %s", _exc)
         return True
     except Exception:
         return False

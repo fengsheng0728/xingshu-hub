@@ -286,4 +286,3 @@ class ScanMixin:
         except Exception:
             logger.exception("scan_cos_merge 异常（降级）")
             return {"enabled": True, "status": "error"}
-

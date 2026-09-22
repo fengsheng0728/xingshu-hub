@@ -4,37 +4,32 @@
 import logging
 logger = logging.getLogger("xingshu.routes")
 
-import asyncio, json, os, sys, time, sqlite3, yaml
-from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any
+import asyncio, os, sys, time
+from typing import Dict, List
 from contextlib import asynccontextmanager
 from routes_automation import register as _register_automation, automation_scheduler
-import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Depends
-from transport_audit import log_transport_frame, log_dispatch_in, log_result_out, log_ack_in, log_ping_pong
-from envelope import envelope_result, envelope_dispatch, envelope_ack, envelope_ping, envelope_pong, parse_envelope, is_legacy_flat, extract_payload, serialize
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 import uuid
-from db import get_lan_ips, check_windows_firewall
 from models import CONFIG
 from hub_core import hub
-from models import HubAgentConfig, DisclosureRules
-from hub_core import hub_agent
-from notifications import notifications
-from logfmt import set_trace_id, get_trace_id
-from auth_provider import get_auth_provider, Principal
+from logfmt import set_trace_id
 
 # Phase 2：共享认证依赖已拆分至 routes_common（此处 re-export 保持外部引用兼容：
-# `from routes import NO_AUTH/_auth_provider/_version_ge/...` 语义不变）
+# `from routes import NO_AUTH/_auth_provider/_version_ge/...` 语义不变。
+# CD-037：本段全部为刻意 re-export——兼容测试 patch（monkeypatch.setattr(routes, ...)
+# 及 `from routes import X`），勿删；F401 逐名 noqa 豁免）
 from routes_common import (
     agent_quotas_snapshot,  # CD-040: O4 配额改用内存快照（不再每请求同步查库）
-    NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
-    _scope_client_ip, get_current_agent, get_current_agent_optional,
-    principal_is_privileged, _version_ge,
+    NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,  # noqa: F401
+    _scope_client_ip, get_current_agent, get_current_agent_optional,  # noqa: F401
+    principal_is_privileged, _version_ge,  # noqa: F401
 )
-# Phase 2 拆分：共享工作区 helper 移入 routes_shared（WS 处理器保留在本文件，运行时引用）
-from routes_shared import _ws, _shared_watchers, _broadcast_shared_update
+# Phase 2 拆分：共享工作区 helper 移入 routes_shared（WS 处理器保留在本文件，运行时引用。
+# CD-037：本行为刻意 re-export，兼容外部 `routes._ws` 等引用，勿删，noqa: F401 豁免）
+from routes_shared import _ws, _shared_watchers, _broadcast_shared_update  # noqa: F401
+# CD-058：MCP 主体身份注入 helper（承载于 routes_gateway 避免与 mcp_server 循环导入）
+from routes_gateway import set_mcp_principal
 
 
 # ============ FastAPI 应用 ============
@@ -73,7 +68,7 @@ async def lifespan(app: FastAPI):
         if getattr(hub, "_shadow", None) is not None:
             hub._shadow.stop(flush=True)
     except Exception as _exc:
-        logger.debug("routes silent-except @72: %s", _exc)
+        logger.debug("routes silent-except(lifespan): %s", _exc)
 
 
 app = FastAPI(
@@ -155,6 +150,34 @@ def _endpoint_allowed(path: str, allowed: List[str]) -> bool:
     )
 
 
+# CD-069（2026-09-20）：受限主体（scoped key / 员工账号模板）的凭据/配置类端点硬拒绝。
+# 这些端点能自我提权（自行签发新 key、改配额、改暴露开关、签员工凭据），
+# 不参与 endpoints 白名单协商——无论 scope 怎么写都拒（fail-closed）。
+SCOPED_PRINCIPAL_DENY_PREFIXES = (
+    "/api/v1/keys",
+    "/api/v1/access",
+    "/api/v1/server",
+    "/api/v1/agents/quota",
+    "/api/v1/agents/full-access",
+    "/api/v1/agents/register",
+    "/api/v1/agents/bootstrap",
+)
+
+
+def _scoped_denied(path: str) -> bool:
+    """受限主体的凭据/配置端点判定（精确 + 边界匹配，口径同 _endpoint_allowed）。"""
+    return any(path == p or path.startswith(p.rstrip("/") + "/")
+               for p in SCOPED_PRINCIPAL_DENY_PREFIXES)
+
+
+def _scope_method_allowed(scope: dict, method: str) -> bool:
+    """CD-069 方法维度白名单：未声明 = 不限（零迁移）；声明后大写精确匹配。"""
+    methods = (scope or {}).get("methods") or []
+    if not isinstance(methods, (list, tuple)) or not methods:
+        return True
+    return str(method or "").upper() in {str(m).strip().upper() for m in methods}
+
+
 class TokenAuthMiddleware:
     """纯 ASGI 中间件 — 统一门卫。WS 通道由 P1 首帧鉴权单独处理。
     P0 S4（2026-08-04）：叠加每 IP 滑动窗口限速（默认 1000 req/s 可配，
@@ -212,12 +235,21 @@ class TokenAuthMiddleware:
             return await _send_401(send)
         # principal 注入请求上下文（披露引擎/审计读取）
         scope["principal"] = principal.to_dict()
-        # S1K scoped key：endpoints 白名单过滤（空 = 全部；前缀匹配，/api/v1 前缀归一）
+        # CD-058：MCP 主体身份注入——contextvar 同 task 传播到 /mcp 工具函数
+        # （GET /mcp/sse 建流即过本中间件，同会话内 tools/call 在该 task 上下文执行）
+        set_mcp_principal(principal)
+        # S1K scoped key：受限主体（scope 非空）三重判定——凭据端点硬拒绝 → endpoints
+        # 白名单 → CD-069 方法白名单；任一层不过即 403（fail-closed）
         _psk = getattr(principal, "scope", None) or {}
+        if _psk and _scoped_denied(path):
+            return await _send_403(
+                send, "scoped key: 凭据/配置类端点不允许受限凭据访问")
         _allowed = _psk.get("endpoints") or []
         if _allowed:
             if not _endpoint_allowed(path, _allowed):
                 return await _send_403(send, "scoped key: endpoint 不在白名单")
+        if not _scope_method_allowed(_psk, scope.get("method", "")):
+            return await _send_403(send, "scoped key: method 不在白名单")
         # O4：按 Agent 配额（reject/throttle/alert_only 三态）
         if not await _agent_quota_ok(scope, principal.subject_id, path):
             return await _send_429(send, scope)
@@ -298,7 +330,7 @@ async def _audit_agent_quota(agent_id: str, path: str, mode: str):
             "agent_quota_exceeded", "audit_log", agent_id,
             {"path": path, "mode": mode})
     except Exception as _exc:
-        logger.warning("routes silent-except @300: %s", _exc)
+        logger.warning("routes silent-except(_audit_agent_quota): %s", _exc)
 
 
 async def _send_429(send, scope):
@@ -321,7 +353,7 @@ async def _audit_rate_limit(ip: str, path: str):
         await hub._log_event("rate_limit_hit", "__http_gate__", {
             "ip": ip, "path": path, "limit_per_ip": CONFIG.RATE_LIMIT_PER_IP})
     except Exception as _exc:
-        logger.warning("routes silent-except @345: %s", _exc)
+        logger.warning("routes silent-except(_audit_rate_limit): %s", _exc)
 
 
 def _extract_bearer(scope) -> str:
@@ -365,9 +397,6 @@ async def _send_401(send):
 
 
 # ============ M3: Memory Pool 增强 ============
-
-from pydantic import BaseModel as PydanticBase, Field as PydanticField
-from typing import Optional as Opt
 
 
 # ============ 披露审批端点 ============
@@ -485,12 +514,14 @@ _register_automation(app, hub, get_current_agent)
 # D-8（3-2b）：WS/静态页/dashboard 端点与私有 helper 已迁入
 # routes_ws.py / routes_pages.py / routes_dashboard.py
 #（/health、/healthz、/readyz、buffer 遥测、skills/catalog 追加进 routes_server.py），
-# 此处 re-export 保持 `from routes import X` / `routes.X` 外部引用语义不变（同一对象，非复制品）
+# 此处 re-export 保持 `from routes import X` / `routes.X` 外部引用语义不变（同一对象，非复制品。
+# CD-037：以下两段全部为刻意 re-export——兼容测试 patch（routes._STATIC_HTML_CACHE.clear()、
+# routes.ws_endpoint 等）与外部引用，勿删；F401 逐名 noqa 豁免）
 from routes_ws import (
-    ws_endpoint, ws_dashboard, ws_buffer_stats, ws_shared_watch, ws_shared,
-    _ws_auth_accept,
+    ws_endpoint, ws_dashboard, ws_buffer_stats, ws_shared_watch, ws_shared,  # noqa: F401
+    _ws_auth_accept,  # noqa: F401
 )
-from routes_pages import _read_static_html, _STATIC_HTML_CACHE, _ui_new_enabled
+from routes_pages import _read_static_html, _STATIC_HTML_CACHE, _ui_new_enabled  # noqa: F401
 from routes_pages import router as _pages_router
 from routes_ws import router as _ws_router
 from routes_dashboard import router as _dashboard_router

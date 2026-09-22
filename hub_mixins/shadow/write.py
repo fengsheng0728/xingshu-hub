@@ -112,7 +112,8 @@ class WriteMixin:
         内存映射（self._origins）供网关读取实时附 origin 字段；
         index/.commits.jsonl 持久化（重启后 collect_origins 可纯文件重建）。
         锚点文件随独立「锚点登记」commit 落 git——定位信息本身也进历史。
-        失败静默降级（D4：定位是增强，不阻塞主链路）。
+        失败降级不阻塞主链路（D4：定位是增强）；CD-047(洞3) 起不再静默——
+        失败路径记 logger.warning（含批次/异常类型）+ stats["origins_failed"] 计数。
         """
         try:
             trunk_hash = self.dt.trunk.head_hash()
@@ -150,8 +151,13 @@ class WriteMixin:
                     "chain_head": current_chain_head(self._audit_db_path),
                     "batch": msg})
             self.dt.trunk.commit("阶段3-P2: 锚点登记（commits + chain-head）")
-        except Exception:
-            logger.exception("真相源定位锚点登记失败（降级，不阻塞主链路）")
+        except Exception as exc:
+            # CD-047(洞3): 静默降级 → 可观测（warning 含批次/异常类型 + stats 计数）。
+            # 行为不变：仍不抛、不阻塞主链路（D4）；链头互证缺失从此有据可查。
+            self.stats["origins_failed"] = self.stats.get("origins_failed", 0) + 1
+            logger.warning(
+                "真相源定位锚点登记失败（降级，不阻塞主链路）批次=%s: %s: %s",
+                msg, type(exc).__name__, exc)
 
     def _append_trunk_jsonl(self, rel: str, record: dict):
         """主干 jsonl 纯追加（读工作区累积——同批未 commit 的追加不能读 HEAD，
@@ -294,7 +300,7 @@ class WriteMixin:
                 with open(full, "r", encoding="utf-8") as f:
                     return f.read()
         except Exception as _exc:
-            logger.debug("shadow silent-except @783: %s", _exc)
+            logger.debug("shadow silent-except(_read_branch_file): %s", _exc)
         return ""
 
     def _append_chain_head(self, batch_msg: str):

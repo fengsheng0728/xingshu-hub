@@ -302,7 +302,7 @@ async def api_team_proxy_disclose(request: Request):
                     {"reason": "invalid or revoked key", "crypto": "plain"},
                 )
             except Exception as _exc:
-                logger.warning("routes_team silent-except @303: %s", _exc)
+                logger.warning("routes_team silent-except(api_team_proxy_disclose): %s", _exc)
             return JSONResponse({"error": "invalid or revoked key"}, status_code=403)
         remote_agent_id, local_role, department, hostname, _sec = row
         body = _json.loads(body_bytes.decode("utf-8"))

@@ -40,7 +40,7 @@ async def api_fed_pull(request: Request,
     try:
         body = await request.json()
     except Exception as _exc:
-        logger.warning("routes_federation silent-except @41: %s", _exc)
+        logger.warning("routes_federation silent-except(api_fed_pull): %s", _exc)
     kinds = body.get("kinds") or ["agents", "memory", "knowledge", "wiki"]
     conn = sqlite3.connect(CONFIG.DB_PATH)
     peers = conn.execute("SELECT * FROM team_members WHERE revoked_at IS NULL").fetchall()
@@ -55,7 +55,7 @@ async def api_fed_pull(request: Request,
             "federation_pull", "audit_log", current_agent,
             {"peers": len(peers), "kinds": kinds})
     except Exception as _exc:
-        logger.warning("routes_federation silent-except @56: %s", _exc)
+        logger.warning("routes_federation silent-except(api_fed_pull): %s", _exc)
     return {"status": "ok", "pulled": results}
 
 

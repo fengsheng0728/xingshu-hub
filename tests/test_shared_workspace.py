@@ -6,6 +6,12 @@ import sys
 
 os.environ["SYNC_HUB_NO_AUTH"] = "1"
 
+def _wiki_concepts_path(fname: str) -> str:
+    """仓库根 wiki/concepts/<fname>：测试自建页的落盘位置（断言后即删，不留环境残留）。"""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "wiki", "concepts", fname)
+
+
 
 @pytest.fixture(scope="module")
 def client():
@@ -76,12 +82,33 @@ class TestSharedWorkspace:
         r = client.get(f"/api/v1/shared/docs/{TestSharedWorkspace.doc_id}", params={"agent_id": "r"})
         assert r.status_code == 404
 
-    def test_08_wiki_ok(self, client):
-        r = client.get("/api/v1/wiki/pages", params={"agent_id": "t"})
-        assert r.status_code == 200
-        assert len(r.json()["pages"]) >= 17
+    def test_08_wiki_ok(self, client, agent):
+        # 2026-09-17 数据清理后修正：原断言 len(pages) >= 17 依赖仓库里遗留的压测页
+        # （环境相关，DB→wiki 派生物被清后必然红）→ 改为自建一页再断言它出现在列表里。
+        rel = "concepts/hermes-test-08-smoke.md"
+        abs_path = _wiki_concepts_path("hermes-test-08-smoke.md")
+        try:
+            r = client.post("/api/v1/wiki/import", params=agent,
+                            json={"pages": {rel: "# smoke\n"}})
+            assert r.status_code == 200, r.text
+            r = client.get("/api/v1/wiki/pages", params=agent)
+            assert r.status_code == 200
+            assert rel in [p["path"] for p in r.json()["pages"]]
+        finally:
+            if os.path.exists(abs_path):
+                os.remove(abs_path)
 
-    def test_09_export_ok(self, client):
-        r = client.get("/api/v1/wiki/export", params={"agent_id": "t"})
-        assert r.status_code == 200
-        assert r.json()["count"] >= 17
+    def test_09_export_ok(self, client, agent):
+        # 同上：原断言 count >= 17 环境相关 → 改为自建页断言导出内容包含它。
+        rel = "concepts/hermes-test-09-smoke.md"
+        abs_path = _wiki_concepts_path("hermes-test-09-smoke.md")
+        try:
+            r = client.post("/api/v1/wiki/import", params=agent,
+                            json={"pages": {rel: "# smoke9\n"}})
+            assert r.status_code == 200, r.text
+            r = client.get("/api/v1/wiki/export", params=agent)
+            assert r.status_code == 200
+            assert rel in r.json()["pages"]
+        finally:
+            if os.path.exists(abs_path):
+                os.remove(abs_path)

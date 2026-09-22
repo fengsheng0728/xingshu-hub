@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from hub_core import hub
 from routes_common import NO_AUTH, get_current_agent
+from routes_common import require_role  # CD-074（hub_token 放行的 canonical 角色门）
 from integrations.registry import ConnectorRegistry
 from integrations.base import HubEvent, config_fingerprint
 
@@ -19,11 +20,12 @@ registry = ConnectorRegistry(hub._db)
 
 
 def _require_manager(current_agent: str):
-    """与 /api/v1/keys 一致的角色门：仅 manager/orchestrator"""
-    if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        if info.get("role") not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403, detail="仅主管/店长可管理集成")
+    """CD-074：委托 canonical `routes_common.require_role`（hub_token 放行）。
+
+    原实现只看 `hub.agents[current_agent].role` → hub_token 登录时该组端点整组 403。
+    """
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, detail="仅主管/店长可管理集成")
+
 
 
 @router.get("/api/v1/integrations")

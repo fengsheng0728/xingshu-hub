@@ -31,7 +31,27 @@ if __name__ == "__main__":
         host = cfg.get("server", {}).get("host", "0.0.0.0")
         port = cfg.get("server", {}).get("port", 3060)
     except Exception as _exc:
-        logger.debug("main silent-except @30: %s", _exc)
+        logger.debug("main silent-except(<module>): %s", _exc)
+
+    # CD-068：可选传输层加密（默认关，零迁移）。开启后 REST→https、WS→wss。
+    # 配了 TLS 但证书不可用 → fail-closed 拒绝启动，绝不静默跑明文。
+    from tls_util import load_tls_config, validate_tls_files, scheme_for
+    _tls = load_tls_config(config_path)
+    _tls_err = validate_tls_files(_tls)
+    if _tls_err:
+        print(f"[FATAL] {_tls_err}", file=sys.stderr)
+        print("[FATAL] 修复: 生成/放置 PEM 证书，或把 server.tls.enabled 置为 false。",
+              file=sys.stderr)
+        sys.exit(1)
+    _tls_kwargs = {}
+    _scheme = scheme_for(_tls["enabled"])
+    if _tls["enabled"]:
+        _tls_kwargs = {"ssl_certfile": _tls["certfile"], "ssl_keyfile": _tls["keyfile"]}
+    elif host not in ("127.0.0.1", "localhost", "::1"):
+        # 对外暴露 + 明文：凭据（Bearer）可被嗅探/中间人——只告警不阻断（存量部署不破坏）
+        print(f"[WARN] 监听 {host} 且未启用 TLS：Bearer 凭据明文过网。"
+              "生产对外请配置 server.tls（见 docs/external-api-access.md）",
+              file=sys.stderr)
 
     is_electron = os.environ.get("SYNC_HUB_ELECTRON") == "1"
     
@@ -53,9 +73,9 @@ if __name__ == "__main__":
                 print("[FATAL] 或显式设置 server.host: 127.0.0.1（仅本机访问）。", file=sys.stderr)
                 sys.exit(1)
         except Exception as _exc:
-            logger.debug("main silent-except @52: %s", _exc)
+            logger.debug("main silent-except(<module>): %s", _exc)
     
-    # OGA: guarded 受管注册必须有部署级 hub_token —— 中间件(routes.py:152)靠
+    # OGA: guarded 受管注册必须有部署级 hub_token —— 中间件(TokenAuthMiddleware)靠
     # CONFIG.HUB_TOKEN 强制 register/bootstrap 引导端点认证, guarded 但 hub_token
     # 为空 = 匿名注册门失效(裸奔),拒绝启动。
     from models import CONFIG
@@ -71,5 +91,6 @@ if __name__ == "__main__":
     fed_crypto.init_replay_store(os.path.join(os.path.dirname(os.path.abspath(CONFIG.DB_PATH)), "replay_nonce.db"))
 
     log_level = "warning" if is_electron else "info"
-    print(f"启动 Hub (host={host}, port={port}, electron={is_electron})")
-    uvicorn.run(app, host=host, port=port, log_level=log_level)
+    print(f"启动 Hub ({_scheme['http']}://{host}:{port}, electron={is_electron}, "
+          f"tls={'on' if _tls['enabled'] else 'off'})")
+    uvicorn.run(app, host=host, port=port, log_level=log_level, **_tls_kwargs)

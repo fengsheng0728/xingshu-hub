@@ -336,7 +336,7 @@ export const useWikiStore = defineStore('wiki', {
       this.error = ''
       const [pages, inbox] = await Promise.allSettled([
         api('/api/v1/wiki/pages'),
-        api('/api/v1/wiki/inbox'),
+        api('/api/v1/wiki/inbox?limit=200')   // CD-043：分页（后端已支持 total/has_more）,
       ])
       if (pages.status === 'fulfilled') this.pages = pages.value.pages || []
       else this.error = pages.reason?.message || 'Wiki 加载失败'

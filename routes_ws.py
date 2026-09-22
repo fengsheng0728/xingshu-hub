@@ -7,7 +7,7 @@ from typing import Dict
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from envelope import envelope_pong, parse_envelope, is_legacy_flat, extract_payload, serialize
+from envelope import envelope_pong, parse_envelope, extract_payload, serialize
 from transport_audit import log_transport_frame, log_dispatch_in, log_ping_pong
 from models import CONFIG
 from hub_core import hub
@@ -84,7 +84,7 @@ async def _audit_ws_ban(ip: str, reason: str = "auth_fail_ban"):
                               "max_fails": CONFIG.WS_AUTH_MAX_FAILS,
                               "ban_sec": CONFIG.WS_AUTH_BAN_SEC})
     except Exception as _exc:
-        logger.warning("routes silent-except @446: %s", _exc)
+        logger.warning("routes silent-except(_audit_ws_ban): %s", _exc)
     try:
         await hub.create_notification(
             "__dashboard__", "security",
@@ -92,7 +92,7 @@ async def _audit_ws_ban(ip: str, reason: str = "auth_fail_ban"):
             f"IP {ip} 在 {CONFIG.WS_AUTH_WINDOW_SEC}s 内鉴权失败 {CONFIG.WS_AUTH_MAX_FAILS} 次，已封禁 {CONFIG.WS_AUTH_BAN_SEC}s",
             source="ws_gate")
     except Exception as _exc:
-        logger.warning("routes silent-except @454: %s", _exc)
+        logger.warning("routes silent-except(_audit_ws_ban): %s", _exc)
 
 
 async def _ws_auth_accept(websocket: WebSocket, agent_id_hint: str = "", strict_agent: bool = False,
@@ -148,6 +148,12 @@ async def _ws_auth_accept(websocket: WebSocket, agent_id_hint: str = "", strict_
     # 凭据有效但非 hub_token/manager/orchestrator → 拒绝，不计入熔断（非鉴权失败）
     if require_privileged and not principal_is_privileged(principal):
         await websocket.close(code=4401, reason="Forbidden: privileged role required")
+        return None
+    # CD-069：scoped key（对外受限凭据）默认不得建任何 WS 连接——WS 是全双工通道，
+    # 绕过 endpoints/methods 白名单（可在同一条连接上跑 memory/task 类命令）。
+    # 需显式 scope.ws = true 才放行（fail-closed；未声明一律拒）。
+    if principal.scoped_key_id and not (principal.scope or {}).get("ws"):
+        await websocket.close(code=4401, reason="Forbidden: scoped key cannot open WS")
         return None
     # hub_token 路径：信任声明身份（D1）；api_key 路径：精确归属
     if principal.auth_mode == "hub_token":
@@ -245,11 +251,10 @@ async def ws_endpoint(websocket: WebSocket, agent_id: str):
                 log_transport_frame('in', env)  # L7
 
             if env is None:
-                if is_legacy_flat(raw):
-                    msg_type = raw.get("msg_type")
-                    if msg_type == "heartbeat":
-                        await hub.heartbeat(agent_id)
-                        hub.record_pong(agent_id)  # L5
+                # 平铺旧格式（version<2）兼容分支于 2026-09-21 下线（CD-032 收口：
+                # 自研 Agent 端砍掉、只放通用 API，该分支已无未来消费方）——
+                # 非 envelope 帧一律丢弃（原分支只兼容旧 Agent 的 heartbeat 平铺帧）
+                continue
             else:
                 etype = env["type"]
                 session_id = env.get("session_id", "")
@@ -267,7 +272,7 @@ async def ws_endpoint(websocket: WebSocket, agent_id: str):
                         try:
                             await websocket.close(code=426, reason=f"agent_version {_ver} < min {CONFIG.AGENT_MIN_VERSION}")
                         except Exception as _exc:
-                            logger.debug("routes silent-except @664: %s", _exc)
+                            logger.debug("routes silent-except(ws_endpoint): %s", _exc)
                         await hub._log_event(
                             "agent_version_rejected", agent_id,
                             {"agent_version": _ver, "min_version": CONFIG.AGENT_MIN_VERSION})
@@ -324,7 +329,7 @@ async def ws_shared_watch(websocket: WebSocket, doc_id: str):
         while True:
             await websocket.receive_text()  # keepalive
     except Exception as _exc:
-        logger.debug("routes silent-except @1057: %s", _exc)
+        logger.debug("routes silent-except(ws_shared_watch): %s", _exc)
     finally:
         watchers.pop(agent_id, None)
         # 通知剩余协作者：成员离开
@@ -334,7 +339,7 @@ async def ws_shared_watch(websocket: WebSocket, doc_id: str):
                 "agent_id": agent_id, "joined": False,
             })
         except Exception as _exc:
-            logger.debug("routes silent-except @1067: %s", _exc)
+            logger.debug("routes silent-except(ws_shared_watch): %s", _exc)
 
 
 @router.websocket("/ws/shared/{doc_id}")

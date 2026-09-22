@@ -100,3 +100,39 @@ routes_n1.py（9 处）、key_scopes.py（8 处）等——单条主键查询为
 - 修复后回归：同上 → **7 passed**（5.11s），行为不变
 - grep 验收：async def 函数体内无直接 `urllib.request.urlopen`，仅 `await asyncio.to_thread`
 - 变更范围：仅 `hub_mixins/team.py`、`routes_team.py` 两个文件 + 本文档（新建）
+
+## 8. B 类处置（2026-09-20，CD-024 轮）
+
+**拍板（用户 2026-09-20）**：选项 A —— 只给**增长型表**补索引 + 确认慢查询护栏；
+**明确不做** 473 处 `to_thread`/`db_facade` 化（保留为「按点做的候选」，见下方触发条件）。
+
+**已落地**：
+
+1. **慢查询护栏（D-10 门面底座已有，本轮确认并固化行为）**：`db_facade._record` 对每次调用计时
+   （含连接建立），耗时 >= `CONFIG.DB_SLOW_QUERY_MS`（默认 200ms；`config.yaml`
+   `database.slow_query_ms` 可覆盖）→ `logger.warning`（含 SQL 前部与耗时）+
+   `_stats["slow_calls"]` 计数 + `_slow_top` 排行。行为由 `tests/test_growth_indexes.py` 的 G-3 固化
+   （阈值调低必告警、超阈值结果不变、计数累加）。
+
+2. **增长型表索引（alembic `0008_growth_indexes` + `db.py` 内联 DDL 双侧同步）**：共 9 条，
+   每条都有代码里实际存在的查询模式支撑；加索引前逐条 `EXPLAIN QUERY PLAN` 实测为 `SCAN`：
+
+   | 表 | 索引 | 支撑的查询 |
+   |---|---|---|
+   | memory_pool | `idx_memory_pool_owner_key(owner_agent_id, memory_key)` | 属主检索 / owner+key 冲突检测 |
+   | memory_pool | `idx_memory_pool_level(disclosure_level)` | 披露级别过滤 / 计数 |
+   | memory_pool | `idx_memory_pool_updated(updated_at)` | 维护清理扫描 |
+   | document_chunks | `idx_document_chunks_parent(parent_doc_id, piece_index)` | 按父文档取块（含 COUNT） |
+   | document_chunks | `idx_document_chunks_level(disclosure_level)` | 级别过滤 |
+   | gateway_read_log | `idx_gateway_read_log_created(created_at)` | 按时间清理 |
+   | events | `idx_events_timestamp(timestamp)` | 按时间清理 / 查询 |
+   | events | `idx_events_agent(agent_id, timestamp)` | 按 agent 取事件 |
+   | wiki_inbox | `idx_wiki_inbox_status(status, created_at)` | 按状态计数（控制台 / 接口两处） |
+
+   双侧一致性由 CD-060 的硬等式门禁 `tests/test_schema_hard_equality.py` 守着（索引集合与规范化
+   DDL 均纳入比对，= 0 差异）。
+
+**剩余（未做，按点触发）**：473 处 async 链上的同步 sqlite 仍归 B 类。触发条件 = `slow_calls` /
+`_slow_top` 出现具体热点，或数据量增长后 P99 抖动 → 届时**按点**迁移到 `db_facade` 门面
+（连接建立与执行都进 `to_thread`；**注意 SQLite 连接不得跨线程**：连接、游标、commit 必须在同一
+闭包内自建自关）。

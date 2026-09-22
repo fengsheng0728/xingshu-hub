@@ -234,7 +234,9 @@ def test_wiki_approve_still_requires_authentication(monkeypatch):
     monkeypatch.setattr(routes_common, "NO_AUTH", False)
     monkeypatch.setattr(
         routes_common, "_auth_provider",
-        lambda: types.SimpleNamespace(authenticate=lambda token, ip="": None))
+        lambda: types.SimpleNamespace(
+            # CD-072：真 provider 的签名含 touch 形参——假桩须兼容（否则依赖层调用 TypeError）
+            authenticate=lambda token, ip="", **kw: None))
     req = types.SimpleNamespace(
         headers={}, scope={"client": None}, query_params={}, path_params={})
     with pytest.raises(HTTPException) as exc:

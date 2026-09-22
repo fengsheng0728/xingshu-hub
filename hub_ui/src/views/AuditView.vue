@@ -31,8 +31,18 @@
 
     <div v-if="verifyResult" class="alert-strip" :style="{ color: verifyResult.valid ? 'var(--ok)' : 'var(--danger)' }">
       <span class="lamp" :class="verifyResult.valid ? 'on-ok' : 'on-danger'"></span>
-      校验完成：{{ verifyResult.valid ? '全链完整' : '发现断链！' }}
+      校验完成：{{ verifyResult.valid ? '无未解释断点' : '发现断链！' }}
       （checked {{ verifyResult.checked_total }}<template v-if="!verifyResult.valid"> · first_bad {{ firstBad }}</template>）
+    </div>
+
+    <!-- CD-073：声明过的缺口必须可见——valid=true 只代表「没有未解释的断点」，
+         把缺口藏进绿灯就等于骗自己 -->
+    <div v-if="declaredGaps.length" class="alert-strip warn">
+      <span class="lamp on-warn"></span>
+      含 {{ declaredGaps.length }} 段已声明缺口（内容已丢失、不可恢复，原因已上链，不计入断链）：
+      <template v-for="(g, i) in declaredGaps" :key="i">
+        <span data-mono>{{ g.chain }} · {{ g.lines }}</span>（{{ g.reason }}）{{ i < declaredGaps.length - 1 ? '；' : '' }}
+      </template>
     </div>
 
     <!-- 检索条 -->
@@ -177,6 +187,24 @@ async function doLoadReads() {
 }
 const verifyResult = ref(null)
 
+// CD-073：把「已声明缺口」从各条链里挑出来显式展示（内容丢了就是丢了，不藏在绿灯里）
+const declaredGaps = computed(() => {
+  const out = []
+  const chains = verifyResult.value?.chains || {}
+  for (const [name, r] of Object.entries(chains)) {
+    for (const g of (r?.declared_gaps || [])) out.push({ ...g, chain: name })
+  }
+  if (out.length) return out
+  // 首屏（未点校验）：用 /api/audit/last-verify 带出的清单，同样显式展示
+  return (audit.lastVerify?.declared_gaps || []).map((g) => ({
+    chain: 'jsonl:' + (g.ref_table || ''),
+    lines: String(g.ref_id || '').replace(/^w-/, ''),
+    reason: g.reason || '已声明缺口',
+    declared_by: g.declared_by || '',
+    created_at: g.created_at || '',
+  }))
+})
+
 onMounted(() => {
   audit.refreshVerify()
   audit.search({})  // 首屏：最近 50 条
@@ -189,7 +217,11 @@ const facets = computed(() => audit.result?.facets || { entry_types: [], ref_tab
 
 const chainText = computed(() => {
   if (!lv.value) return '未校验'
-  return lv.value.valid ? '完整' : '断链'
+  if (!lv.value.valid) return '断链'
+  // CD-073：有已声明缺口时不许只写"完整"——缺口必须在卡片上就看得见
+  return declaredGaps.value.length
+    ? `完整（含 ${declaredGaps.value.length} 段已声明缺口）`
+    : '完整'
 })
 const chainColor = computed(() =>
   !lv.value ? 'var(--text-2)' : lv.value.valid ? 'var(--ok)' : 'var(--danger)')

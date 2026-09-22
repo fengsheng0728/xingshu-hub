@@ -33,6 +33,7 @@ def _start_auth_hub(tmpdir, port):
   port: {port}
 database:
   path: {db}
+  chroma_path: {os.path.join(tmpdir, "chroma_db").replace(chr(92), "/")}
 backup_enabled: False
 auth:
   hub_token: "test-hub-token"
@@ -40,6 +41,7 @@ auth:
     env = dict(os.environ)
     env["SYNC_HUB_CONFIG_DIR"] = tmpdir
     env.pop("SYNC_HUB_NO_AUTH", None)
+    env["SYNC_HUB_CHROMA_PATH"] = os.path.join(tmpdir, "chroma_db")  # CD-070b
     proc = subprocess.Popen(
         [sys.executable, "main.py"],
         cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

@@ -66,7 +66,7 @@ class _StubProvider:
     def __init__(self, mapping):
         self._mapping = mapping
 
-    def authenticate(self, token, client_ip=""):
+    def authenticate(self, token, client_ip="", **kw):  # CD-072: 兼容 touch 形参
         return self._mapping.get(token)
 
 

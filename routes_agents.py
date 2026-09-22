@@ -60,7 +60,7 @@ async def api_set_agent_quota(request: Request,
             "agent_quota_set", "audit_log", agent_id,
             {"actor": current_agent, "qps_limit": qps, "mode": mode, "burst": burst})
     except Exception as _exc:
-        logger.warning("routes_agents silent-except @58: %s", _exc)
+        logger.warning("routes_agents silent-except(api_set_agent_quota): %s", _exc)
     return {"ok": True, "agent_id": agent_id, "qps_limit": qps, "mode": mode}
 
 

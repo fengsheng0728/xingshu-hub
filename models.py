@@ -67,6 +67,11 @@ class Config:
     DISCLOSURE_SCOPE = DisclosureScope.MANAGER
     CHROMA_PATH: str = "./chroma_db"
     CHROMA_COLLECTION: str = "sync_hub"
+    # CD-070b（2026-09-20）：测试态产物隔离 —— 空 = 沿用仓库内路径（生产默认）。
+    # 事故背景同 CD-070：测试按默认路径写仓库根，跑一轮就改生产 chroma/wiki/audit。
+    AUDIT_DIR: str = ""        # 审计产物根（空 = 仓库内 audit/）：anchor.txt / memory_pool.jsonl / transport.jsonl / tsa/
+    WIKI_ROOT: str = ""        # wiki 页根（空 = 仓库内 wiki/）
+    WORKSPACE_YSTORE_PATH: str = ""   # pycrdt 共享文档 ystore 文件（空 = cwd 相对 "ystore.db"）
     EMBEDDING_MODEL: str = "paraphrase-multilingual-MiniLM-L12-v2"
     # K1（2026-08-06，附录 F）：embedding provider 抽象 — hasher(默认词袋) | sentence(真语义)
     EMBEDDING_PROVIDER: str = "hasher"
@@ -78,6 +83,13 @@ class Config:
     # XS-004(2026-09-08): 审计锚定外发 — 空列表=不外发(本地文件仅快照), 默认休眠
     AUDIT_ANCHOR_URLS: list = field(default_factory=list)  # 外部锚接收方 URL 列表(HTTP POST JSON)
     AUDIT_ANCHOR_INTERVAL: int = 3600  # 定时外发周期秒(0=仅启动时一次后停止循环)
+
+
+    # CD-034 R3：链头外部时间戳（RFC3161 TSA）。默认关（不联网，与 anchor_urls 同哲学）；
+    # 开启后按 AUDIT_TSA_INTERVAL 周期对链头盖章，校验时回拉比对，不一致告警。
+    AUDIT_TSA_ENABLED: bool = False
+    AUDIT_TSA_URL: str = ""            # 空 = 用 audit_chain.DEFAULT_TSA_URL（公共免费 TSA）
+    AUDIT_TSA_INTERVAL: int = 86400    # 盖章周期秒（默认每日一次）
     HUB_TOKEN: str = ""  # 部署级单 token（config.yaml auth.hub_token）— 空=仅 api_key 认证
     # OGA: 注册准入模式 — open=自注册(默认,内网兼容) | guarded=受管注册(需 hub_token,防匿名注册)
     AUTH_REGISTRATION: str = "open"
@@ -117,6 +129,9 @@ class Config:
     WORKSPACE_SWEEP_INTERVAL_SEC: int = 60     # 清扫周期秒
     WORKSPACE_MAX_ROOMS: int = 200             # 常驻 room 数水位阈值（跨阈值告警）
     CHROMA_MAX_VECTORS: int = 50000            # ChromaDB 集合向量数水位阈值
+    # K-1（2026-09-16）：知识条目写入路径单条最大切片入向量数（写入延迟护栏；
+    # sentence 档 ~10-30ms/chunk，200 封顶最坏个位数秒；hasher 档可忽略）
+    KB_EMBED_MAX_CHUNKS: int = 200
 
     # D-10(2026-09-10): db 门面慢查询阈值毫秒（0 = 每次调用都记 WARNING，仅测试用）
     DB_SLOW_QUERY_MS: int = 200
@@ -179,6 +194,9 @@ def _load_config_from_yaml() -> dict:
                 overrides["EMBEDDING_MODEL_PATH"] = str(emb["model_path"])
             if emb.get("model"):
                 overrides["EMBEDDING_MODEL"] = str(emb["model"])
+            # K-1: 知识条目写侧切片入向量上限（可选段，缺失走 Config 默认值 200）
+            if emb.get("kb_embed_max_chunks") is not None:
+                overrides["KB_EMBED_MAX_CHUNKS"] = int(emb["kb_embed_max_chunks"])
             # P0 S4：暴露面收敛配置（ws 熔断 / 限速 / 联邦发现）
             ws = cfg.get("ws", {})
             if ws.get("auth_timeout_sec"):
@@ -218,8 +236,25 @@ def _load_config_from_yaml() -> dict:
                 overrides["AUDIT_ANCHOR_URLS"] = [str(u) for u in urls]
             if audit_cfg.get("anchor_interval") is not None:
                 overrides["AUDIT_ANCHOR_INTERVAL"] = int(audit_cfg["anchor_interval"])
+
+            if audit_cfg.get("dir") is not None:
+                overrides["AUDIT_DIR"] = str(audit_cfg["dir"])
+            tsa_cfg = audit_cfg.get("tsa") or {}
+            if tsa_cfg:
+                if tsa_cfg.get("enabled") is not None:
+                    overrides["AUDIT_TSA_ENABLED"] = bool(tsa_cfg["enabled"])
+                if tsa_cfg.get("url"):
+                    overrides["AUDIT_TSA_URL"] = str(tsa_cfg["url"])
+                if tsa_cfg.get("interval") is not None:
+                    overrides["AUDIT_TSA_INTERVAL"] = int(tsa_cfg["interval"])
             # 3-7(2026-09-10): workspace 容量护栏段 + database.chroma_max_vectors
             # 一律 is not None 判定：缺省不覆盖（保持 Config 默认值），显式写 0 也能生效
+            wsp_y = cfg.get("workspace", {}) or {}
+            if wsp_y.get("ystore_path") is not None:
+                overrides["WORKSPACE_YSTORE_PATH"] = str(wsp_y["ystore_path"])
+            _wiki = cfg.get("wiki") or {}
+            if _wiki.get("root") is not None:
+                overrides["WIKI_ROOT"] = str(_wiki["root"])
             wsp = cfg.get("workspace", {})
             if wsp.get("room_idle_ttl_sec") is not None:
                 overrides["WORKSPACE_ROOM_IDLE_TTL_SEC"] = int(wsp["room_idle_ttl_sec"])
@@ -233,7 +268,7 @@ def _load_config_from_yaml() -> dict:
             if db.get("slow_query_ms") is not None:
                 overrides["DB_SLOW_QUERY_MS"] = int(db["slow_query_ms"])
     except Exception as _exc:
-        logger.debug("models silent-except @209: %s", _exc)
+        logger.debug("models silent-except(_load_config_from_yaml): %s", _exc)
     # OGA: auth.registration 值校验放 try 外 —— 函数体宽 except 会吞异常,
     # 拼错(如 "guraded")若静默回落 open = 受管语义失效,必须在此显式拒绝。
     if registration_raw is not None:
@@ -250,6 +285,24 @@ def _load_config_from_yaml() -> dict:
     env_chroma = os.environ.get("SYNC_HUB_CHROMA_PATH")
     if env_chroma:
         overrides["CHROMA_PATH"] = env_chroma
+    # CD-070b：派生产物根（审计 / wiki）env 覆盖 —— 测试进程与测试自 spawn 的
+    # Hub 子进程都据此把产物写到 tmp，绝不写仓库根（默认空 = 沿用生产路径）。
+    env_audit = os.environ.get("SYNC_HUB_AUDIT_DIR")
+    if env_audit:
+        overrides["AUDIT_DIR"] = env_audit
+    env_wiki = os.environ.get("SYNC_HUB_WIKI_ROOT")
+    if env_wiki:
+        overrides["WIKI_ROOT"] = env_wiki
+    env_ystore = os.environ.get("SYNC_HUB_YSTORE_PATH")
+    if env_ystore:
+        overrides["WORKSPACE_YSTORE_PATH"] = env_ystore
+    # CD-070（2026-09-20）：数据库路径 env 覆盖 —— 与 migrations/alembic/env.py 的
+    # SYNC_HUB_DB 口径对齐。此前 models.py 不认这个变量，测试/迁移脚本只能落到
+    # config 默认的仓库根 ./sync_hub.db（实测顶掉过生产库：29 agent/记忆/知识全空）。
+    # env 优先级高于 config.yaml（与 SYNC_HUB_DATA_TRUNK / SYNC_HUB_CHROMA_PATH 同族）。
+    env_db = os.environ.get("SYNC_HUB_DB")
+    if env_db:
+        overrides["DB_PATH"] = env_db
     return overrides
 
 
@@ -264,6 +317,43 @@ def _make_config() -> Config:
 
 
 CONFIG = _make_config()
+
+# ============ CD-070：生产库防误写硬门（2026-09-20）============
+# 事故背景：测试模块级 import db/models 时按 config 默认路径在仓库根建库，把
+# ./sync_hub.db（生产库）顶掉 —— 2026-09-20 实测 29 个 agent / memory_pool /
+# knowledge_base / shared_docs 全被清空。生产库落在仓库根是「正常运行态」，
+# 所以硬门只在测试态生效：测试态下 DB 若解析到仓库根生产库，直接 fail。
+_REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+_ROOT_DB_PATH = os.path.join(_REPO_ROOT, "sync_hub.db")
+
+
+def _in_test_context() -> bool:
+    """测试态判定：显式守卫 env / pytest 运行时标记 / 测试 NO_AUTH 标记。"""
+    if os.environ.get("SYNC_HUB_DB_GUARD", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if os.environ.get("PYTEST_VERSION") or os.environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    return bool(os.environ.get("SYNC_HUB_NO_AUTH"))
+
+
+def assert_db_path_safe(db_path: str, context: str = "") -> str:
+    """测试态硬门：DB 路径不得解析到仓库根生产库；返回规范化绝对路径。
+
+    生产运行（无测试标记）不受影响 —— 生产库本来就该是仓库根 ./sync_hub.db。
+    """
+    resolved = os.path.abspath(db_path)
+    if resolved == _ROOT_DB_PATH:
+        raise RuntimeError(
+            "[DB 路径硬门] 测试态下解析到仓库根生产库, 拒绝继续: "
+            f"{db_path!r} -> {resolved}"
+            + (f" (来源: {context})" if context else "")
+            + "; 测试请设 SYNC_HUB_DB 指向临时库（conftest 已强制）。")
+    return resolved
+
+
+if _in_test_context():
+    assert_db_path_safe(CONFIG.DB_PATH, "models import")
+
 
 PUBLIC_DOMAIN = "公共区"  # XS-001: 空域记忆归属域（员工模板 __public__ 占位对齐）
 
@@ -355,6 +445,9 @@ class SemanticSearchRequest(BaseModel):
     n_results: int = 10
     filter_owner: Optional[str] = None
     filter_tags: Optional[List[str]] = None
+    # K-1（2026-09-16）：可选层过滤。"" = 不过滤（memory+knowledge 都查，向后兼容）；
+    # "memory"/"knowledge" = 只查对应层。注意：无 layer 键的旧向量在显式 layer=memory 时不命中。
+    layer: str = ""
 
 
 class KnowledgeEntry(BaseModel):

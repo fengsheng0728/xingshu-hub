@@ -4,10 +4,12 @@ logger = logging.getLogger("xingshu.routes_maintenance")
 
 import asyncio
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, Request
 
 from db import get_lan_ips, check_windows_firewall
+from deps import CONFIG
 from hub_core import hub
+from routes_common import get_current_agent, require_ops_privilege, log_ops_trigger
 
 router = APIRouter()
 
@@ -19,9 +21,23 @@ async def api_db_stats():
 
 
 @router.post("/api/v1/maintenance/cleanup")
-async def api_force_cleanup():
-    """手动触发数据清理"""
-    return await hub.force_cleanup()
+async def api_force_cleanup(
+    request: Request,
+    current_agent: str = Depends(get_current_agent),
+):
+    """手动触发数据清理（CD-061：补 Depends 认证 + 重运维统一门 + 触发审计）"""
+    await require_ops_privilege(request, "/api/v1/maintenance/cleanup", current_agent)
+    before = await hub._db_stats()
+    result = await hub.force_cleanup()
+    counts = {}
+    for table in ("memory_pool", "events", "tasks"):
+        after = result.get(table) if isinstance(result, dict) else None
+        counts[table] = {
+            "before": before.get(table, "unavailable"),
+            "after": after if after is not None else "unavailable",
+        }
+    await log_ops_trigger("/api/v1/maintenance/cleanup", current_agent, counts)
+    return result
 
 
 @router.get("/api/v1/maintenance/shadow-stats")
@@ -33,9 +49,10 @@ async def api_shadow_stats():
     """
     w = getattr(hub, "_shadow", None)
     if w is None:
+        # CD-047(L3): 占位响应同样带 switches 键（只增键，既有键与结构不变）
         return {"enabled": False, "stats": None, "kind_count": {},
                 "queue_depth": 0, "pending_incomplete": 0,
-                "daemon_alive": False}
+                "daemon_alive": False, "switches": {}}
     return w.stats_snapshot()
 
 
@@ -46,6 +63,21 @@ async def api_network_info():
         "network": await asyncio.to_thread(get_lan_ips),
         "firewall": await asyncio.to_thread(check_windows_firewall, 3060),
     }
+
+
+@router.post("/api/v1/maintenance/shadow-reconcile")
+async def api_shadow_reconcile(
+    request: Request,
+    current_agent: str = Depends(get_current_agent),
+):
+    """T31: 手动触发影子档案对账（孤儿/跨天重复归档）。走 CD-061 运维门 + ops_trigger 审计。"""
+    await require_ops_privilege(request, "/api/v1/maintenance/shadow-reconcile", current_agent)
+    from hub_mixins.shadow.reconcile import reconcile_shadow_archives
+    stats = await asyncio.to_thread(
+        reconcile_shadow_archives, hub.data_trunk,
+        db_path=getattr(hub, "_audit_db_path", None) or getattr(CONFIG, "DB_PATH", None))
+    await log_ops_trigger("/api/v1/maintenance/shadow-reconcile", current_agent, stats)
+    return stats
 
 
 @router.get("/api/v1/maintenance/backup-status")
@@ -64,7 +96,7 @@ async def api_backup_status():
         with open(os.path.join(config_dir, "config.yaml"), "r", encoding="utf-8") as f:
             backup_cfg = (yaml.safe_load(f) or {}).get("database", {})
     except Exception as _exc:
-        logger.debug("routes_maintenance silent-except @63: %s", _exc)
+        logger.debug("routes_maintenance silent-except(api_backup_status): %s", _exc)
 
     backup_dir = os.path.join(config_dir, "backups")
     files = []

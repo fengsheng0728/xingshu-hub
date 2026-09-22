@@ -28,6 +28,45 @@ logger = logging.getLogger("key_scopes")
 
 _DEFAULT_SCOPE = {"endpoints": [], "data_domain": [], "level_cap": ""}
 
+# CD-069（2026-09-20）：方法维度白名单——对外只读 key 的第二道限制。
+# 未声明（缺键/空列表）= 不限方法（既有 key 零迁移）；声明后按大写精确匹配，
+# 未知方法值不命中（fail-closed，绝不允许「写了错值却静默放宽」）。
+ALLOWED_METHODS = ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
+
+
+def normalize_methods(methods) -> List[str]:
+    """scope.methods 归一化：大写 + 去重 + 去空；None/非列表/空 → []（=不限）。"""
+    if not methods:
+        return []
+    if isinstance(methods, str):
+        methods = methods.split(",")
+    if not isinstance(methods, (list, tuple)):
+        return []
+    out: List[str] = []
+    for m in methods:
+        s = str(m).strip().upper()
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+def validate_scope(scope: dict) -> str:
+    """签发侧 fail-closed 校验：返回错误文案，空串 = 合法。
+
+    只校验 methods——它决定越权面（方法白名单写错 = 只读 key 静默变全权限）。
+    """
+    methods = (scope or {}).get("methods")
+    if methods in (None, "", []):
+        return ""
+    norm = normalize_methods(methods)
+    bad = [m for m in norm if m not in ALLOWED_METHODS]
+    if bad:
+        return (f"methods 非法: {','.join(bad)} "
+                f"(可选 {'|'.join(ALLOWED_METHODS)})")
+    if not norm:
+        return "methods 声明了但无可识别的方法值"
+    return ""
+
 
 def key_hash(raw: str) -> str:
     """SHA256 哈希（不存明文）"""
@@ -59,7 +98,13 @@ class ScopedKeyStore:
                expires_at: str = "") -> Dict:
         """创建 scoped key，返回 {key_id, key(明文仅此一次), scope}"""
         raw_key = gen_key()
+        _err = validate_scope(scope or {})
+        if _err:
+            # 直接调用方（非 CLI/REST）也不得静默签发错 scope：fail-closed 抛错
+            raise ValueError(_err)
         scope_norm = {**_DEFAULT_SCOPE, **{k: v for k, v in (scope or {}).items() if v}}
+        if scope_norm.get("methods"):
+            scope_norm["methods"] = normalize_methods(scope_norm["methods"])
         with self._lock:
             conn = _connect(self._db_path)
             key_id = "key-" + secrets.token_hex(6)

@@ -135,7 +135,7 @@ def get_embedding_provider(name: str = "hasher",
     return LocalEmbedding(n_features=n_features)
 
 # O3(2026-08-05): 升级回滚 — 迁移前自动备份 + 失败恢复
-SCHEMA_VERSION = 6  # S1=1, S2=2, S3=3, O4=4, H1=5, G1=6（shadow_pending）（O3 起用 user_version 记录）
+SCHEMA_VERSION = 7  # S1=1, S2=2, S3=3, O4=4, H1=5, G1=6（shadow_pending）（O3 起用 user_version 记录）, CD-045=7（event_outbox）
 
 
 def _pre_migrate_backup(db_path: str, backup_dir: str) -> str:
@@ -160,6 +160,8 @@ def init_db():
     c = conn.cursor()
 
     # Agent 表
+    # CD-060（2026-09-20）：列序对齐 alembic 基线（0001 基线 + 0002/0003 追加序），
+    # 下方冻结 ALTER 段对新库转为 no-op 守卫，存量库仍由其补列（幂等）。
     c.execute("""
         CREATE TABLE IF NOT EXISTS agents (
             agent_id TEXT PRIMARY KEY,
@@ -172,11 +174,26 @@ def init_db():
             endpoint TEXT,
             registered_at TEXT,
             last_heartbeat TEXT,
-            status TEXT DEFAULT 'offline'
+            status TEXT DEFAULT 'offline',
+            api_key TEXT,
+            api_key_created_at TEXT,
+            api_key_expires_at TEXT,
+            api_key_prev TEXT,
+            api_key_prev_expires_at TEXT,
+            api_key_ip_whitelist TEXT,
+            last_used_at TEXT,
+            -- CD-060 口径（2026-09-20 复核修正）：api_key_hash / api_key_prev_hash **有意不内联**——
+            -- 代码按 PRAGMA 列存在性自动切换明文/哈希模式（T1-2 渐进迁移锚点）；
+            -- 若内联补齐，新库将直接进 hash 模式、
+            -- 注册/重注册回执 api_key 变空串，破坏既有幂等回执行为
+            -- （全量回归实测 5 例红，见台账 CD-060 口径变更记录）。
+            full_access INTEGER NOT NULL DEFAULT 0
         )
     """)
 
     # 记忆池（按 Agent 隔离，带披露策略）
+    # CD-060（2026-09-20）：列序对齐 alembic 基线（0001 基线 + M3/S3 追加序，
+    # updated_at 补 DEFAULT NULL）；conn4/conn6 的幂等 ALTER 对新库转为 no-op。
     c.execute("""
         CREATE TABLE IF NOT EXISTS memory_pool (
             memory_id TEXT PRIMARY KEY,
@@ -187,17 +204,20 @@ def init_db():
             embedding BLOB,
             importance REAL,
             tags TEXT,
-            kind TEXT DEFAULT 'fact',
-            source_session_id TEXT DEFAULT '',
-            confidence REAL DEFAULT 1.0,
-            source_type TEXT DEFAULT 'user',
             disclosure_level TEXT DEFAULT 'summary',
             disclosure_scope TEXT DEFAULT 'manager',
             allowed_viewers TEXT,
             created_at TEXT,
-            updated_at TEXT,
             access_count INTEGER DEFAULT 0,
-            last_accessed TEXT
+            last_accessed TEXT,
+            kind TEXT DEFAULT 'fact',
+            source_session_id TEXT DEFAULT '',
+            confidence REAL DEFAULT 1.0,
+            source_type TEXT DEFAULT 'user',
+            updated_at TEXT DEFAULT NULL,
+            trust_level TEXT NOT NULL DEFAULT 'internal',
+            source_agent_id TEXT DEFAULT '',
+            tainted_at TEXT DEFAULT ''
         )
     """)
 
@@ -232,6 +252,8 @@ def init_db():
     """)
 
     # 披露日志（审计）
+    # CD-060（2026-09-20）：列序对齐 alembic（0001 基线 + 0002 追加
+    # prev_hash/entry_hash/trace_id），下方冻结 ALTER 段对新库转为 no-op。
     c.execute("""
         CREATE TABLE IF NOT EXISTS disclosure_log (
             log_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -243,6 +265,8 @@ def init_db():
             disclosed_content TEXT,
             disclosed_at TEXT,
             reason TEXT,
+            prev_hash TEXT NOT NULL DEFAULT '',
+            entry_hash TEXT NOT NULL DEFAULT '',
             trace_id TEXT
         )
     """)
@@ -291,6 +315,8 @@ def init_db():
     """)
 
     # 通知表（P7：持久化通知 + 已读/未读）
+    # CD-060（2026-09-20）：列序对齐 alembic（created_at 归位、source/artifact_path/
+    # channel_status 按追加序后置，source 默认值沿用现库 "" 写法），c3b ALTER 转 no-op。
     c.execute("""
         CREATE TABLE IF NOT EXISTS notifications (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -301,9 +327,10 @@ def init_db():
             related_task_id TEXT,
             related_agent_id TEXT,
             is_read INTEGER DEFAULT 0,
-            source TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            source TEXT DEFAULT "",
             artifact_path TEXT DEFAULT '',
-            created_at TEXT NOT NULL
+            channel_status TEXT DEFAULT ''
         )
     """)
 
@@ -323,6 +350,8 @@ def init_db():
     """)
 
     # 自动化任务表（R1）
+    # CD-060（2026-09-20）：列序对齐 alembic（0001 基线 + 追加序）；schedule_kind 默认值
+    # 'cron'→'every'、heartbeat_file 补 DEFAULT ''（与现库/0001 逐字一致），c3c ALTER 转 no-op。
     c.execute("""
         CREATE TABLE IF NOT EXISTS automation_jobs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -333,10 +362,6 @@ def init_db():
             delivery TEXT NOT NULL DEFAULT '["notification"]',
             guardrail TEXT NOT NULL DEFAULT '{"max_iterations":10,"max_tokens":50000,"permission":"read_memory+write_memory"}',
             enabled INTEGER NOT NULL DEFAULT 1,
-            schedule_kind TEXT DEFAULT 'cron',
-            payload_type TEXT DEFAULT 'instruction',
-            heartbeat_file TEXT,
-            delete_after_run INTEGER DEFAULT 0,
             owner_agent_id TEXT NOT NULL,
             run_count INTEGER DEFAULT 0,
             last_run_at TEXT,
@@ -344,11 +369,15 @@ def init_db():
             last_run_duration_ms INTEGER,
             last_result_summary TEXT,
             next_run_at TEXT,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now')),
             consecutive_failures INTEGER DEFAULT 0,
             missed_runs INTEGER DEFAULT 0,
             allow_auto_source INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
+            schedule_kind TEXT DEFAULT 'every',
+            payload_type TEXT DEFAULT 'instruction',
+            heartbeat_file TEXT DEFAULT '',
+            delete_after_run INTEGER DEFAULT 0
         )
     """)
 
@@ -383,7 +412,8 @@ def init_db():
             importance REAL DEFAULT 1.0,
             created_by TEXT,
             created_at TEXT,
-            updated_at TEXT
+            updated_at TEXT,
+            embedding BLOB
         )
     """)
 
@@ -435,6 +465,8 @@ def init_db():
     """)
 
     # 内网组队 — 团队成员表
+    # CD-060（2026-09-20）：补 team_id（对齐 0001 基线；存量库由 alembic 0007 幂等补列），
+    # shared_secret 保持在末位（对齐现库追加序），下方 c3 ALTER 转 no-op。
     c.execute("""
         CREATE TABLE IF NOT EXISTS team_members (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -451,25 +483,93 @@ def init_db():
             key_expires_at TEXT NOT NULL,
             last_heartbeat TEXT,
             revoked_at TEXT,
+            team_id INTEGER REFERENCES teams(id),
             shared_secret TEXT,  -- P2: 配对握手 HKDF 派生的 AES-GCM 会话密钥（hex），联邦加密信道用
             UNIQUE(local_agent_id, remote_hub_id)
         )
     """)
 
     # 配对码临时表（一次性使用，5分钟TTL）
+    # CD-060（2026-09-20）：agent_id_a 移到末位（对齐 0001 基线追加序），c3 ALTER 转 no-op。
     c.execute("""
         CREATE TABLE IF NOT EXISTS pairing_codes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             code TEXT NOT NULL,
             hub_id_a TEXT NOT NULL,
             hub_id_b TEXT,
-            agent_id_a TEXT,
             created_at TEXT DEFAULT (datetime('now')),
             expires_at TEXT NOT NULL,
             attempts INTEGER DEFAULT 0,
-            used INTEGER DEFAULT 0
+            used INTEGER DEFAULT 0,
+            agent_id_a TEXT
         )
     """)
+
+    # ============ CD-060（2026-09-20）内联 DDL 补齐：原仅 alembic 路径存在的表 ============
+    # 以下 5 表 + 1 索引此前只在 alembic 基线（0001/0002）里，未跑 alembic 的新库会缺表。
+    # DDL 与 alembic 侧规范化对齐；全部 IF NOT EXISTS 幂等，存量库重复执行无副作用。
+    # teams 组队表（0001 基线）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            owner_agent_id TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    # cron_jobs 定时任务表（0001 基线）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS cron_jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            schedule TEXT NOT NULL,
+            action TEXT NOT NULL DEFAULT 'report',
+            action_params TEXT DEFAULT '{}',
+            enabled INTEGER DEFAULT 1,
+            created_by TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            last_run TEXT,
+            next_run TEXT,
+            run_count INTEGER DEFAULT 0
+        )
+    """)
+    # buffer_log 写缓冲 WAL 表（0001 基线；运行时 hub_mixins/buffer.py:185 也有
+    # IF NOT EXISTS 惰性兜底，DDL 与本段规范化一致，谁先建都幂等）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS buffer_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT, agent_id TEXT, title TEXT, entry_id TEXT,
+            queued_at TEXT, flushed_at TEXT, synced_at TEXT,
+            flush_latency_ms REAL
+        )
+    """)
+    # CD-017: entry_id 索引（0001 基线；buffer.py 同样幂等兜底）
+    c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_buffer_log_entry ON buffer_log(entry_id, flushed_at)
+    """)
+    # hub_agent_conversations 对话历史表（0001 基线；hub_agent_lc.py:28 惰性兜底，同上幂等）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS hub_agent_conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL,
+            role TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+    """)
+    # backup_markers 备份锚点表（0002 补建；hub_cli.py 只读不写建表）
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS backup_markers (
+            marker_id TEXT PRIMARY KEY,
+            created_at TEXT
+        )
+    """)
+    # CD-060 lazy 登记：shared_docs 刻意不在此内联建表（避免双份 DDL 冲突）。
+    # 实际创建者：shared_workspace.py:29 SHARED_DOCS_DDL，由 SharedWorkspace._init_db()
+    # （shared_workspace.py:63，start() 首次调用时）惰性创建；下方 S3 taint ALTER 段
+    # 对该表有「不存在则跳过」守卫。硬等式验收（tests/test_schema_hard_equality.py）
+    # 按 lazy 白名单单列豁免并注明本创建者。
 
     conn.commit()
     conn.close()
@@ -553,6 +653,14 @@ def init_db():
     pc_cols = [col[1] for col in c3.fetchall()]
     if "agent_id_a" not in pc_cols:
         c3.execute("ALTER TABLE pairing_codes ADD COLUMN agent_id_a TEXT")
+        conn3.commit()
+
+    # 增量迁移（CD-055，2026-09-19）：knowledge_base.embedding 向量列
+    # （0001 基线已含该列但内联 CREATE 长期缺失；与 alembic 0005 逐字对齐）
+    c3.execute("PRAGMA table_info(knowledge_base)")
+    kb_cols = [col[1] for col in c3.fetchall()]
+    if "embedding" not in kb_cols:
+        c3.execute("ALTER TABLE knowledge_base ADD COLUMN embedding BLOB")
         conn3.commit()
 
     # 增量迁移：team_members.shared_secret（P2 联邦加密会话密钥）
@@ -728,6 +836,35 @@ def init_db():
     )""")
 
     # 阶段2 网关读审计（2026-08-30）：谁/哪把 key/看了什么/给到哪级/何时
+    # 1e 身份供给 · 部门目录（2026-09-20）：部门**只做目录与默认值载体** —— 权限判定仍走
+    # employee_accounts.department / project_scope（CD-025 读时派生口径不变），刻意不成为
+    # 第二真相源。按 name 与员工记录 join（存量员工建部门后自动归位，零数据迁移）；
+    # 改名用 PATCH 的 sync_employees 一次性同步员工字段。
+    conn6.execute("""CREATE TABLE IF NOT EXISTS departments (
+        department_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        description TEXT DEFAULT '',
+        default_role_template TEXT DEFAULT 'staff',
+        created_by TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now'))
+    )""")
+
+    # CD-072（2026-09-20）员工凭据账本：每人可多把、各自过期/状态/调用画像，
+    # 可按 key_id 单把吊销。形态对齐 agent_keys（key_scopes.py）。明文仍只存 SHA256；
+    # employee_accounts.key_hash 保留为「最近一把」镜像（双写）→ 老路径/回滚仍可用。
+    conn6.execute("""CREATE TABLE IF NOT EXISTS employee_keys (
+        key_id TEXT PRIMARY KEY,
+        employee_id TEXT NOT NULL,
+        key_hash TEXT NOT NULL,
+        label TEXT DEFAULT '',
+        status TEXT DEFAULT 'active',
+        created_by TEXT DEFAULT '',
+        created_at TEXT DEFAULT (datetime('now')),
+        expires_at TEXT DEFAULT '',
+        last_used_at TEXT DEFAULT '',
+        call_count INTEGER DEFAULT 0
+    )""")
+
     conn6.execute("""CREATE TABLE IF NOT EXISTS gateway_read_log (
         log_id INTEGER PRIMARY KEY AUTOINCREMENT,
         requester TEXT NOT NULL,
@@ -819,8 +956,52 @@ def init_db():
         conn6.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         conn6.commit()
     except Exception as _exc:
-        logger.debug("db silent-except @818: %s", _exc)
+        logger.debug("db silent-except(init_db): %s", _exc)
     conn6.close()
+    # CD-045 审计 outbox（事务内事件行 → 后台消费者异步落审计链；重启自动 replay）
+    conn7 = sqlite3.connect(CONFIG.DB_PATH)
+    conn7.execute("""CREATE TABLE IF NOT EXISTS event_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now','localtime')),
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT ''
+)""")
+    conn7.execute("""CREATE INDEX IF NOT EXISTS idx_event_outbox_status ON event_outbox(status, attempts)""")
+    conn7.commit()
+    try:
+        conn7.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn7.commit()
+    except Exception as _exc:
+        logger.debug("db silent-except @conn7: %s", _exc)
+    conn7.close()
+    # ═══ CD-024 增长型表索引（2026-09-20）═══
+    # 为**随业务增长**的表补索引，支撑代码里实际存在的 WHERE/ORDER BY 模式
+    # （改动前逐条 EXPLAIN QUERY PLAN 实测全为 SCAN，见 tests/test_growth_indexes.py）。
+    # 不为小表/低频表加。**必须与 alembic 0008 双侧同步**——CD-060 的硬等式门禁
+    # （tests/test_schema_hard_equality.py，比对含索引集合与规范化 DDL）要求两侧 = 0 差异。
+    conn8 = sqlite3.connect(CONFIG.DB_PATH)
+    for _sql in (
+        # memory_pool：按属主检索 / owner+key 冲突检测 / 级别过滤 / 清理扫描
+        "CREATE INDEX IF NOT EXISTS idx_memory_pool_owner_key ON memory_pool(owner_agent_id, memory_key)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_pool_level ON memory_pool(disclosure_level)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_pool_updated ON memory_pool(updated_at)",
+        # document_chunks：按父文档取块（含 COUNT）/ 级别过滤
+        "CREATE INDEX IF NOT EXISTS idx_document_chunks_parent ON document_chunks(parent_doc_id, piece_index)",
+        "CREATE INDEX IF NOT EXISTS idx_document_chunks_level ON document_chunks(disclosure_level)",
+        # gateway_read_log：按时间清理 / 读审计查询
+        "CREATE INDEX IF NOT EXISTS idx_gateway_read_log_created ON gateway_read_log(created_at)",
+        # events：按时间清理 / 按 agent 取事件
+        "CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)",
+        "CREATE INDEX IF NOT EXISTS idx_events_agent ON events(agent_id, timestamp)",
+        # wiki_inbox：按状态计数（控制台/接口两处 COUNT）
+        "CREATE INDEX IF NOT EXISTS idx_wiki_inbox_status ON wiki_inbox(status, created_at)",
+    ):
+        conn8.execute(_sql)
+    conn8.commit()
+    conn8.close()
 
 
 _init_guard = os.environ.get("SYNC_HUB_SKIP_MIGRATE_BACKUP", "")
@@ -873,7 +1054,7 @@ def _get_lan_ips_impl() -> dict:
             if not primary.startswith("127."):
                 result["primary"] = primary
         except Exception as _exc:
-            logger.debug("db silent-except @872: %s", _exc)
+            logger.debug("db silent-except(_get_lan_ips_impl): %s", _exc)
         finally:
             s.close()
 
@@ -885,7 +1066,7 @@ def _get_lan_ips_impl() -> dict:
                 if not ip.startswith("127.") and ip not in result["ips"]:
                     result["ips"].append(ip)
         except Exception as _exc:
-            logger.debug("db silent-except @884: %s", _exc)
+            logger.debug("db silent-except(_get_lan_ips_impl): %s", _exc)
 
         if not result["ips"] and result["primary"] != "127.0.0.1":
             result["ips"] = [result["primary"]]

@@ -88,6 +88,19 @@ class MaintenanceMixin:
                 )
                 mem_deleted = c.rowcount
 
+                # CD-064 残余①：memory_pool_fts 是外部内容表
+                # （content='memory_pool'）且全库无触发器，直删主表只会留孤儿词元
+                # （memory_search 回查主表过滤，语义不脏但索引持续漂移）；
+                # 批量清理后整表 rebuild 兜平——幂等、成本 O(行数)，
+                # 清理本身是启停期低频动作。表缺失（极老库）
+                # 或 FTS 不可用则跳过，不连累 events/memory/tasks 清理。
+                if mem_deleted:
+                    try:
+                        c.execute("INSERT INTO memory_pool_fts(memory_pool_fts) VALUES('rebuild')")
+                        logger.info(f"memory FTS 重建（配合清理 {mem_deleted} 条）")
+                    except sqlite3.OperationalError as fts_err:
+                        logger.warning(f"memory FTS rebuild 跳过: {fts_err}")
+
                 # 清理已完成/已取消的旧任务
                 cutoff_tasks = (datetime.now(timezone.utc).timestamp()
                                 - CONFIG.RETENTION_TASKS_DAYS * 86400)
@@ -164,7 +177,7 @@ class MaintenanceMixin:
                         await ws.send_text(serialize(ping))
                         log_ping_pong('out', ping)
                     except Exception as _exc:
-                        logger.debug("maintenance silent-except @164: %s", _exc)
+                        logger.debug("maintenance silent-except(_keepalive_ping): %s", _exc)
 
 
     async def _cleanup_loop(self):
@@ -196,10 +209,10 @@ class MaintenanceMixin:
                                 try:
                                     await self.active_ws[aid].close()
                                 except Exception as _exc:
-                                    logger.debug("maintenance silent-except @196: %s", _exc)
+                                    logger.debug("maintenance silent-except(_cleanup_loop): %s", _exc)
                                 del self.active_ws[aid]
                     except Exception as _exc:
-                        logger.debug("maintenance silent-except @199: %s", _exc)
+                        logger.debug("maintenance silent-except(_cleanup_loop): %s", _exc)
 
                 if offline_ids:
                     with self._db() as conn:
@@ -246,7 +259,7 @@ class MaintenanceMixin:
                 from routes import _auth_provider
                 provider = _auth_provider()
             except Exception as _exc:
-                logger.debug("maintenance silent-except @246: %s", _exc)
+                logger.debug("maintenance silent-except(_rotate_expired_keys): %s", _exc)
             if provider is None:
                 provider = LocalProvider(CONFIG)
             if not hasattr(provider, "rotate_keys"):
@@ -262,7 +275,7 @@ class MaintenanceMixin:
                         f"检测到 {rotated} 个 Agent 的 api_key 到期，已自动轮换（旧 key 24h 宽限）",
                         source="key_rotation")
                 except Exception as _exc:
-                    logger.warning("maintenance silent-except @262: %s", _exc)
+                    logger.warning("maintenance silent-except(_rotate_expired_keys): %s", _exc)
         except Exception as e:
             self.logger.warning("rotate_expired_keys failed: %s", e)
 

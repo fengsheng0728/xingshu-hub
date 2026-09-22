@@ -60,6 +60,9 @@ disclosure:
   default_manager_level: summary     # 主管查看下属的默认披露级别 (metadata|summary|full)
   orchestrator_max_level: full       # 调度者最高披露级别
   allow_peer_disclosure: true        # 同任务协作成员能否互看摘要？
+  # published_public: true           # CD-033A: 企业已发布内容(知识层命中)对全体已注册
+                                   # Agent 可见到摘要级(SUMMARY, 仅从 NONE 提升不降级);
+                                   # 关闭(false)后退回"发布内容对非协作 worker 不可见"的旧行为
 
 # ---- 日志 ----
 logging:
@@ -70,6 +73,15 @@ logging:
 server:
   host: 127.0.0.1                  # 监听地址 (127.0.0.1=仅本机, 0.0.0.0=局域网)
   port: 3060                       # 监听端口
+
+  # CD-068: 可选传输层加密（默认关=旧行为零迁移）。开启后 REST 走 https、WS 走 wss，
+  # 对外放出 API 前必须解决这一层（否则 Bearer 凭据明文过网）。
+  # 证书用企业 CA/公网证书时调用方走系统信任链，零配置；自签仅供内网联调。
+  # 生成自签证书: python scripts/gen_tls_cert.py --out ./config --hosts hub.corp.local,192.168.1.10
+  # tls:
+  #   enabled: false
+  #   certfile: ./config/server.crt   # PEM（相对路径按 config 目录解析）
+  #   keyfile:  ./config/server.key   # PEM 私钥
 
 # XS-004: 审计锚定外发到外部介质(可选) — 不配/留空 = 默认休眠(本地文件仅快照)
 # audit:
@@ -89,6 +101,21 @@ ws:
 # 默认 1000 远高于 200 并发压测基线；设 0 关闭
 rate_limit:
   per_ip: 1000
+
+# ---- embedding（K-1 2026-09-16 新增示例段；整段可选，缺省全走代码默认值）----
+# embedding:
+#   provider: hasher             # hasher=词面哈希(默认,零依赖,384维；不是语义模型,不得对外称"语义检索")
+#                                # sentence=真语义(需 pip install -r requirements-vector.txt + 本地模型目录)
+#   model_path: ""               # sentence provider 的本地模型目录（离线包分发）
+#   kb_embed_max_chunks: 200     # K-1: 知识条目写侧单条最大切片入向量数（写入延迟护栏）
+
+# ---- 知识向量对账（CD-051 2026-09-17 新增示例段；整段可选，缺省全走代码默认值）----
+# 启动后自动对账：逐条比对 chroma 实际 chunk 与「按当前切分口径应得的 ids」，
+# 不一致就重灌那一条（补齐漏建 + 清多余）；关闭后仅手动端点
+# POST /api/v1/knowledge/reindex 可用（同一套对账逻辑）。
+# knowledge:
+#   reconcile_on_start: true       # 启动后自动对账开关（默认 true）
+#   reconcile_delay_sec: 15        # 启动后延迟秒数再对账（避开启动高峰与 embedding 模型首载竞争；默认 15）
 
 # 联邦发现模式：multicast（默认，广播+多播）| static（静态清单，无 UDP 流量）
 # static 适合 UDP 被安全设备拦截的内网；节点清单格式：

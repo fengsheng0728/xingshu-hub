@@ -65,7 +65,7 @@ def parse_envelope(raw: dict) -> Optional[dict]:
     # Version check
     ver = raw.get("version", 1)
     if ver < 2:
-        return None  # Legacy flat format — caller handles compat
+        return None  # 平铺旧格式（version<2）已不支持；兼容分支 2026-09-21 下线（CD-032）
     # Required fields
     if not all(k in raw for k in ("type", "id", "ts")):
         return None
@@ -77,10 +77,6 @@ def parse_envelope(raw: dict) -> Optional[dict]:
             # Payload must not contain envelope field names
             return None
     return raw
-
-def is_legacy_flat(raw: dict) -> bool:
-    """检测旧格式平铺消息（version < 2 或缺少 envelope 必需字段）"""
-    return raw.get("version", 1) < 2
 
 def extract_payload(envelope: dict) -> dict:
     """从信封提取业务载荷"""

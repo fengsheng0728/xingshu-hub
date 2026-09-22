@@ -85,15 +85,21 @@ def _load_secret_keywords() -> List[str]:
 # ── PII 正则（E.1：预扫在切割前全文跑） ──
 
 # 身份证：18 位（17 数字 + 校验位 X），可带空格
-RE_ID_CARD = re.compile(r"\b\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b")
+# CD-066：\b 在汉字粘连下漏检（Python re 中汉字属 \w）→ 改数字边界 lookaround，
+# 只扩大召回：左右邻汉字/字母/标点均可命中，左右邻数字（更长数字串内部）仍不命中
+RE_ID_CARD = re.compile(r"(?<!\d)\d{6}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx](?!\d)")
 # 手机号：1[3-9] 开头 11 位
-RE_PHONE = re.compile(r"\b1[3-9]\d{9}\b")
+# CD-066：\b → (?<!\d)/(?!\d)：粘连汉字/字母可命中，12 位以上数字串内部不命中
+RE_PHONE = re.compile(r"(?<!\d)1[3-9]\d{9}(?!\d)")
 # 银行卡：13-19 位纯数字（非手机号前缀）
-RE_BANK_CARD = re.compile(r"\b(?:62|60|52|53|54|55|56|58)\d{11,17}\b")
+# CD-066：\b → (?<!\d)/(?!\d)：粘连汉字可命中，更长数字串内部不命中
+RE_BANK_CARD = re.compile(r"(?<!\d)(?:62|60|52|53|54|55|56|58)\d{11,17}(?!\d)")
 # 密钥串：sk-/ghp_/AKIA/eyJ(长 base64) 等
-RE_SECRET_KEY = re.compile(r"\b(?:sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})\b")
+# CD-066：\b → (?<![A-Za-z0-9])/(?![A-Za-z0-9])：粘连汉字可命中，更长字母数字串内部不命中
+RE_SECRET_KEY = re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9]{16,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,})(?![A-Za-z0-9])")
 # 邮箱（隐私）
-RE_EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+# CD-066：\b → (?<![A-Za-z0-9])/(?![A-Za-z0-9])：粘连汉字可命中，字母数字粘连的内部不重复命中
+RE_EMAIL = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9])")
 
 PII_PATTERNS: List[Tuple[str, re.Pattern]] = [
     ("id_card", RE_ID_CARD),

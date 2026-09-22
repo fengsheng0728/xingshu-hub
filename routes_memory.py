@@ -17,6 +17,7 @@ from routes_common import (
     _scope_client_ip, get_current_agent, get_current_agent_optional,
     get_current_principal,
 )
+from routes_gateway import _log_read, _log_deny  # CD-054(T10): memory 读端点复用网关读审计 helper；CD-059(T18): 拒绝留痕
 
 router = APIRouter()
 
@@ -92,12 +93,25 @@ async def api_memory_versions(
     memory_key: str,
     agent_id: str,
     current_agent: str = Depends(get_current_agent),
+    principal=Depends(get_current_principal),
 ):
     """获取记忆版本历史"""
     if not NO_AUTH and current_agent != agent_id:
+        _log_deny(current_agent, principal, "memory", "", agent_id)
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份操作 {agent_id}")
-    return await hub.get_memory_versions(memory_key, agent_id)
+    result = await hub.get_memory_versions(memory_key, agent_id)
+    if result.get("status") == "forbidden":
+        # CD-056: 归属不成立与 key 不存在同一个 403，不泄露存在性；
+        # CD-059(T18): 该 403 落读审计 denied 行（只记拒绝事实，不记存在性差异）
+        _log_deny(current_agent, principal, "memory", "", agent_id)
+        raise HTTPException(status_code=403, detail="无权访问该记忆的版本历史")
+    try:
+        _log_read(current_agent, principal, "memory", "", agent_id, "",
+                  len(result.get("versions") or []), 0)
+    except Exception:
+        pass  # 读审计失败不阻塞读取（D4）
+    return result
 
 
 @router.post("/api/v1/memory/{memory_key}/rollback")
@@ -127,10 +141,17 @@ async def api_disclose(
     决定披露级别：NONE → METADATA → SUMMARY → FULL
     """
     if not NO_AUTH and current_agent != req.requester_agent_id:
+        _log_deny(current_agent, principal, "memory", req.query, req.target_agent_id)
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份操作 {req.requester_agent_id}")
     scope = principal.scope if principal else None
-    return await hub.request_disclosure(req, scope=scope)
+    result = await hub.request_disclosure(req, scope=scope)
+    try:
+        _log_read(current_agent, principal, "memory", req.query, req.target_agent_id, "",
+                  len(result.get("memories") or []), 0)
+    except Exception:
+        pass  # 读审计失败不阻塞读取（D4）
+    return result
 
 
 @router.post("/api/v1/memory/semantic_search")
@@ -144,12 +165,23 @@ async def api_semantic_search(
 
     将查询文本转为向量，在 ChromaDB 中搜索语义相似的记忆，
     返回结果受披露策略控制（与 disclosure 引擎一致）。
+
+    K-1：可选字段 layer（""=不过滤 / "memory" / "knowledge"）由
+    SemanticSearchRequest 承载并随 req 整体透传，本端点无新增代码，
+    默认值下响应与改动前一致。
     """
     if not NO_AUTH and current_agent != req.requester_agent_id:
+        _log_deny(current_agent, principal, "memory", req.query, req.filter_owner or "")
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份操作 {req.requester_agent_id}")
     scope = principal.scope if principal else None
-    return await hub.semantic_search(req, scope=scope)
+    result = await hub.semantic_search(req, scope=scope)
+    try:
+        _log_read(current_agent, principal, "memory", req.query, req.filter_owner or "", "",
+                  len(result.get("memories") or []), 0)
+    except Exception:
+        pass  # 读审计失败不阻塞读取（D4）
+    return result
 
 
 class MemorySearchRequest(PydanticBase):
@@ -164,11 +196,19 @@ class MemorySearchRequest(PydanticBase):
 async def api_memory_search(
     req: MemorySearchRequest,
     current_agent: str = Depends(get_current_agent),
+    principal=Depends(get_current_principal),
 ):
     if not NO_AUTH and current_agent != req.agent_id:
+        _log_deny(current_agent, principal, "memory", req.query, req.agent_id)
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份检索 {req.agent_id}")
-    return await hub.memory_search(req)
+    result = await hub.memory_search(req)
+    try:
+        _log_read(current_agent, principal, "memory", req.query, req.agent_id, "",
+                  len((result or {}).get("results") or []), 0)
+    except Exception:
+        pass  # 读审计失败不阻塞读取（D4）
+    return result
 
 
 @router.get("/api/v1/memory")
@@ -176,10 +216,18 @@ async def api_get_memories(
     agent_id: str,
     kind: str = "",
     current_agent: str = Depends(get_current_agent),
+    principal=Depends(get_current_principal),
 ):
     if not NO_AUTH and current_agent != agent_id:
+        _log_deny(current_agent, principal, "memory", "", agent_id)
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份查看 {agent_id}")
-    return hub.get_memories(agent_id, kind)
+    result = hub.get_memories(agent_id, kind)
+    try:
+        _log_read(current_agent, principal, "memory", "", agent_id, "",
+                  len((result or {}).get("memories") or []), 0)
+    except Exception:
+        pass  # 读审计失败不阻塞读取（D4）
+    return result
 
 

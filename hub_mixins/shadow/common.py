@@ -229,7 +229,7 @@ def _read_worktree(root: str, rel: str) -> str:
             with open(full, "r", encoding="utf-8") as f:
                 return f.read()
     except Exception as _exc:
-        logger.debug("shadow silent-except @1338: %s", _exc)
+        logger.debug("shadow silent-except(_read_worktree): %s", _exc)
     return ""
 
 

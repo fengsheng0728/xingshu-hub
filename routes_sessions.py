@@ -94,7 +94,7 @@ async def api_session_handoff(
                               "title": req.title,
                               "msg_count": len(req.messages)})
     except Exception as _exc:
-        logger.warning("routes_sessions silent-except @94: %s", _exc)
+        logger.warning("routes_sessions silent-except(api_session_handoff): %s", _exc)
     return {"status": "ok", "handoff": True,
             "to_agent_id": req.to_agent_id, "messages": len(req.messages)}
 

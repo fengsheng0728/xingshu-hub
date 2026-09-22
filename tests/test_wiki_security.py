@@ -55,7 +55,7 @@ def test_absolute_path_rejected():
 def test_windows_path_rejected():
     """Windows 反斜杠应被拒"""
     with pytest.raises(ValueError):
-        validate_path("..\..\secret.txt")
+        validate_path(r"..\..\secret.txt")
 
 
 def test_valid_path_accepted():

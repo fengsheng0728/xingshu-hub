@@ -12,6 +12,11 @@ from db import row_to_dict
 import db_facade
 from functools import partial
 
+import collections
+import time
+
+_SEARCH_STATS = {"count": 0, "degraded": 0, "last_ms": 0.0, "samples": collections.deque(maxlen=200)}
+
 logger = logging.getLogger("xingshu.disclosure")
 
 # 向后兼容
@@ -189,6 +194,15 @@ class DisclosureEngine:
                 creator = task.get("creator_agent_id", "")
                 if requester in (assigned, creator) or owner in (assigned, creator):
                     return DisclosureLevel.SUMMARY
+            # r4_published_public（CD-033A 2026-09-17）：已发布内容链尾提升 NONE→SUMMARY。
+            # 必须是"提升"而非覆盖：上方所有早退分支（r1 自己/r2 白名单/r2b 组交集/
+            # r5 主管看下属/r6 店长全局）返回的 FULL/SUMMARY 结果一字不动，能走到这里的
+            # 只有 NONE，故绝不降级任何现有判定；放在链尾同理——只在所有既有规则都
+            # 判 NONE 之后兜底，不抢占任何既有规则的优先级。
+            # 标记来源：仅 disclosure._knowledge_hit 构造的知识层伪 dict 带 published=True，
+            # 记忆行永不带此标记 → 本分支对记忆天然不触发，r3 记忆 NONE 阻断在其之前早退。
+            if memory.get("published") is True and policy.get("published_public", True):
+                return DisclosureLevel.SUMMARY
             return DisclosureLevel.NONE
 
         # 规则 8：记忆自身的级别上限
@@ -200,7 +214,10 @@ class DisclosureEngine:
         if level_map.get(required_level, 0) > level_map.get(mem_level, 0):
             return mem_level
 
-        # 默认：不披露
+        # 默认：不披露（CD-033A：链尾兜底同样挂 r4_published_public 提升——
+        # 走到这里说明前面所有规则都未放行，只可能从 NONE 提升，语义同规则 7 链尾注释）
+        if memory.get("published") is True and policy.get("published_public", True):
+            return DisclosureLevel.SUMMARY
         return DisclosureLevel.NONE
 
     def _resolve_memory_domain(self, memory: dict) -> str:
@@ -227,7 +244,7 @@ class DisclosureEngine:
                     if row and (row[0] or "").strip():
                         return row[0].strip()
                 except Exception as _exc:
-                    logger.debug("disclosure silent-except @218: %s", _exc)
+                    logger.debug("disclosure silent-except(_resolve_memory_domain): %s", _exc)
                 try:
                     # employee_id 列名以 auth_provider._lookup_employee_by_key 为准
                     c.execute(
@@ -240,7 +257,7 @@ class DisclosureEngine:
                 except Exception:
                     pass  # employee_accounts 表不存在/缺列 → 静默落空，归公共区
         except Exception as _exc:
-            logger.debug("disclosure silent-except @231: %s", _exc)
+            logger.debug("disclosure silent-except(_resolve_memory_domain): %s", _exc)
         return ""
 
     def disclose_for_principal(
@@ -381,9 +398,30 @@ class DisclosureEngine:
     # ── 语义搜索 ──
 
     async def semantic_search(self, req: SemanticSearchRequest, scope: dict = None) -> dict:
+        """CD-043：计时 + 降级计数包装（供 /api/v1/stats 观测）。"""
+        t0 = time.perf_counter()
+        res = await self._semantic_search_impl(req, scope=scope)
+        ms = (time.perf_counter() - t0) * 1000.0
+        _SEARCH_STATS["count"] += 1
+        _SEARCH_STATS["last_ms"] = round(ms, 2)
+        _SEARCH_STATS["samples"].append(ms)
+        if isinstance(res, dict) and res.get("degraded"):
+            _SEARCH_STATS["degraded"] += 1
+        return res
+
+
+    async def _semantic_search_impl(self, req: SemanticSearchRequest, scope: dict = None) -> dict:
         """基于 ChromaDB 的语义搜索（CD-016: ChromaDB 故障时降级 SQLite 关键词 + degraded 标记）"""
         hub = self.hub
         degraded = False
+        # CD-052（用户修正 4）: 索引重建窗口 fail-closed——不返回任何正文，
+        # 也不回退 SQLite 关键词链（窗口语义冻死；降级标记复用既有 degraded
+        # 机制，reason 明确为 index_rebuilding）。消费方：routes_gateway
+        # 语义读返回体 degraded 字段、_SEARCH_STATS 降级计数（routes_dashboard
+        # 统计端点）——均为透传/计数，无需改动。
+        if getattr(hub, "_index_rebuilding", False):
+            return {"query": req.query, "total": 0, "memories": [],
+                    "degraded": True, "degraded_reason": "index_rebuilding"}
         if hub._chroma_collection is None:
             # CD-016: ChromaDB 不可用（未初始化/初始化失败）→ 直接降级，不再返回 error
             degraded = True
@@ -425,15 +463,40 @@ class DisclosureEngine:
         return result
 
     async def _chroma_search(self, req, query_emb, scope: dict = None) -> list:
-        """ChromaDB 向量检索（含披露级别过滤）"""
+        """ChromaDB 向量检索（含披露级别过滤）
+
+        K-1（2026-09-16，方案 B）：统一 collection + layer 分流——
+        - where 过滤：filter_owner 行为不变；新增可选 layer 过滤
+          （req.layer 为空 = 不过滤，memory+knowledge 都查，向后兼容）。
+        - 命中后按 metadata 的 layer 分流回查：layer == "knowledge"
+          （或旧数据无 layer 但带 entry_id）→ 回查 knowledge_base；
+          其余（含无 layer 键的旧向量）→ 走原 memory_pool 回查，一字不改。
+        """
         hub = self.hub
+        # CD-052（用户修正 4）: 重建窗口 fail-closed（防御层，直调路径也拦）
+        if getattr(hub, "_index_rebuilding", False):
+            return []
         where_filter = {}
         if req.filter_owner:
             where_filter["owner"] = req.filter_owner
+        # K-1: 可选 layer 过滤（"" = 不过滤）
+        req_layer = (getattr(req, "layer", "") or "").strip()
+        if req_layer:
+            where_filter["layer"] = req_layer
+        # CD-048: 密级粗过滤——排除 level=="none" 的向量（防历史脏数据；
+        # NONE 级本就不建 embedding，见 memory.py E.6）。
+        # 注意：where 只做粗过滤、绝不当权限依据——命中后正文与披露级别的
+        # 权威判定仍是回查 SQLite 后的 disclose_for_principal（8 规则链，
+        # fail-closed）。chromadb $ne 对缺 level 键的旧向量/知识 chunk
+        # 照样命中（K-1 统一检索不回归）。
+        conditions = [{k: v} for k, v in where_filter.items()]
+        conditions.append({"level": {"$ne": "none"}})
+        # chroma where 语法：多条件必须 $and，单条件不包 $and
+        where_clause = {"$and": conditions} if len(conditions) > 1 else conditions[0]
 
         results = hub._chroma_collection.query(
             query_embeddings=[query_emb], n_results=req.n_results,
-            where=where_filter if where_filter else None,
+            where=where_clause,
         )
 
         memories = []
@@ -441,6 +504,15 @@ class DisclosureEngine:
             mem_id = results["ids"][0][i]
             metadata = results["metadatas"][0][i]
             distance = results["distances"][0][i] if results.get("distances") else 0
+
+            # K-1: 按 layer 分流回查（无 layer 的旧向量一律按 memory 处理）
+            hit_layer = (metadata.get("layer") or "").strip()
+            if hit_layer == "knowledge" or (not hit_layer and metadata.get("entry_id")):
+                kb_hit = await self._knowledge_hit(mem_id, metadata, distance, req, scope)
+                if kb_hit is None:
+                    continue  # 与原行为一致：回查不到 / 披露 NONE → 跳过该条
+                memories.append(kb_hit)
+                continue
 
             row = await db_facade.query_one(
                 "SELECT * FROM memory_pool WHERE memory_id = ?", (mem_id,))
@@ -464,6 +536,147 @@ class DisclosureEngine:
                 "similarity": round(1 - distance, 4),
             })
         return memories
+
+    async def _knowledge_hit(self, mem_id, metadata, distance, req, scope: dict = None):
+        """K-1: knowledge 层命中的回查 + 披露过滤。返回结果条目或 None（跳过）。
+
+        CD-052（2026-09-19，方案 A）最小披露：正文一律不读 metadata（索引里
+        已无 content 键），命中后按 entry_id 前缀分层回查——
+        - `doc:` 前缀 → 文档型：查 document_chunks（parent_doc_id = entry_id[4:]），
+          按 chunk 级密级走既有 search_chunks 语义（min(请求方判定, chunk 存储级别)
+          + 滑窗降级），取命中的那一段；无对应行 → fail-closed 返回 None；
+        - 其它 → 普通条目：从 knowledge_base.content 按写侧完全一致的口径重切
+          （chunker.chunk_document(f"kb:{entry_id}", content, embed_fn=None)
+          + KB_EMBED_MAX_CHUNKS），取 metadata.piece_index 对应段；越界/为空
+          → fail-closed 返回 None。
+
+        披露语义：复用 disclose_for_principal 既有 8 规则链，不自创放行规则。
+        knowledge_base 无 disclosure_level 列 → 构造伪 memory dict，
+        自身级别按 "summary"（企业已发布知识默认摘要级可见），
+        规则链判 NONE（如规则 7 同级 worker 无协作）→ 返回 None（fail-closed）。
+        CD-052 修正4：重建窗口（hub._index_rebuilding 置位）期间不回退任何
+        旧路径，直接 fail-closed 返回 None。
+        """
+        # CD-052 修正4: 重建窗口 fail-closed（防御层；_chroma_search 已先拦）
+        if getattr(self.hub, "_index_rebuilding", False):
+            return None
+        entry_id = (metadata.get("entry_id") or "").strip()
+        if not entry_id:
+            return None
+        # CD-052: 无 piece_index 的旧向量不回退读 metadata 明文（旧路径已含
+        # content 键）——fail-closed 丢弃，待一次性 rebuild 清库重建后恢复
+        piece_index = metadata.get("piece_index")
+        if piece_index is None:
+            return None
+        try:
+            piece_index = int(piece_index)
+        except (TypeError, ValueError):
+            return None
+
+        # ── doc: 前缀 → 文档型：document_chunks 按 chunk 级密级回查 ──
+        if entry_id.startswith("doc:"):
+            doc_id = entry_id[4:]
+            chunk_row = await db_facade.query_one(
+                "SELECT * FROM document_chunks WHERE parent_doc_id = ?"
+                " AND piece_index = ?", (doc_id, piece_index))
+            if not chunk_row:
+                return None  # fail-closed：无对应行 → 丢弃该命中
+            chunk = _row_dict(chunk_row)
+            chunk["owner_agent_id"] = chunk.get("source_agent_id") or ""
+            # 既有 search_chunks 语义（disclosure.search_chunks）：逐 chunk
+            # 8 规则链判定 → min(请求方判定, chunk 存储级别) → 滑窗降级
+            level = self._calculate_disclosure_level(
+                memory=chunk, requester=req.requester_agent_id, task={},
+                required_level=DisclosureLevel.SUMMARY,
+            )
+            if level == DisclosureLevel.NONE:
+                return None
+            stored = DisclosureLevel(chunk.get("disclosure_level") or "summary")
+            if stored == DisclosureLevel.NONE:
+                return None
+            if _level_rank(level) > _level_rank(stored):
+                level = stored
+            total_row = await db_facade.query_one(
+                "SELECT COUNT(*) FROM document_chunks WHERE parent_doc_id = ?",
+                (doc_id,))
+            total = total_row[0] if total_row else 0
+            if total and self._chunk_quota_check(
+                    req.requester_agent_id, doc_id, total):
+                if level == DisclosureLevel.FULL:
+                    level = DisclosureLevel.SUMMARY  # 滑窗降级（同 search_chunks）
+            content = self._extract_by_level(chunk, level)
+            kb_row = await db_facade.query_one(
+                "SELECT title, tags, importance, created_by FROM knowledge_base"
+                " WHERE entry_id = ?", (entry_id,))
+            kb = _row_dict(kb_row) if kb_row else {}
+            return {
+                "memory_id": mem_id, "owner": kb.get("created_by") or "",
+                "disclosure_level": level.value, "content": content,
+                "tags": json.loads(kb.get("tags") or "[]"),
+                "importance": kb.get("importance", 0),
+                "similarity": round(1 - distance, 4),
+                # K-1 响应契约：知识命中带 origin/entry_id/title 以区分来源与出处
+                "origin": "knowledge",
+                "entry_id": entry_id,
+                "title": kb.get("title") or "",
+            }
+
+        # ── 普通条目：knowledge_base.content 按写侧口径重切取段 ──
+        row = await db_facade.query_one(
+            "SELECT * FROM knowledge_base WHERE entry_id = ?", (entry_id,))
+        if not row:
+            return None
+        kb = _row_dict(row)
+
+        full_content = kb.get("content") or ""
+        if not full_content.strip():
+            return None  # fail-closed：无权威全文 → 丢弃该命中
+        from chunker import chunk_document
+        max_chunks = getattr(CONFIG, "KB_EMBED_MAX_CHUNKS", 200)
+        chunks = chunk_document(f"kb:{entry_id}", full_content,
+                                embed_fn=None)[:max_chunks]
+        chunk_text = ""
+        for ch in chunks:
+            if ch["piece_index"] == piece_index:
+                chunk_text = ch["content"] or ""
+                break
+        if not chunk_text:
+            return None  # fail-closed：piece_index 越界/为空 → 丢弃该命中
+
+        mem_dict = {
+            # 伪 memory dict：只供披露规则链消费，字段语义对齐 memory_pool
+            "owner_agent_id": kb.get("created_by") or "",
+            "disclosure_level": "summary",
+            "allowed_viewers": "[]",
+            "tags": kb.get("tags") or "[]",
+            "importance": kb.get("importance", 0),
+            "created_at": kb.get("created_at", ""),
+            "content": chunk_text,
+            "summary": chunk_text[:200],
+            # CD-033A：知识层 = 企业已发布内容，打 published 标记供 r4_published_public
+            # 链尾提升（NONE→SUMMARY）；记忆行永不带此键，规则对记忆天然不触发
+            "published": True,
+        }
+        level = self.disclose_for_principal(
+            memory=mem_dict, requester=req.requester_agent_id,
+            task={}, required_level=DisclosureLevel.SUMMARY, scope=scope,
+        )
+        if level == DisclosureLevel.NONE:
+            return None
+
+        content = self._extract_by_level(mem_dict, level)
+        return {
+            "memory_id": mem_id, "owner": kb.get("created_by") or "",
+            "disclosure_level": level.value, "content": content,
+            "tags": json.loads(kb.get("tags") or "[]"),
+            "importance": kb.get("importance", 0),
+            "similarity": round(1 - distance, 4),
+            # K-1 响应契约：知识命中带 origin/entry_id/title 以区分来源与出处
+            "origin": "knowledge",
+            "entry_id": entry_id,
+            "title": kb.get("title") or "",
+        }
+
 
     async def _sqlite_keyword_search(self, req, scope: dict = None) -> list:
         """降级：SQLite 关键词检索（content LIKE，disclosure_level != none）+ 披露级别过滤"""

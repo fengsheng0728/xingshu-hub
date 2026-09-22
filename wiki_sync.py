@@ -18,9 +18,19 @@ import argparse
 from datetime import datetime
 
 from wiki_engine import WIKI_ROOT, ensure_wiki, validate_path
+from models import CONFIG
 
-# 数据库路径（与 CONFIG 保持一致）
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sync_hub.db")
+# CD-070（2026-09-20）：数据库路径改走 CONFIG（env SYNC_HUB_DB > config.yaml > 默认），
+# 不再硬编码仓库根 —— 原写法 `os.path.join(dirname(__file__), "sync_hub.db")` 让
+# wiki 同步绕开 CONFIG 直写生产库（实测：跑一次回归就给生产库塞了 embedding UPDATE
+# 与 wiki_inbox INSERT，并在生产 wiki/ 目录重写页面）。
+# 保留模块级属性名，既有测试仍可 monkeypatch wiki_sync.DB_PATH。
+DB_PATH = CONFIG.DB_PATH
+
+# CD-055（2026-09-19）：embedding 写回失败的降级标记（不阻断 sync 批处理）。
+# 落点：本模块级状态 + sync() 返回 stats["embedding_degraded"] —— 经
+# routes_wiki._wiki_sync_state["last_result"] 透出到 GET /api/v1/wiki/sync/status。
+EMBEDDING_SYNC_STATE = {"degraded": False, "failures": 0, "last_error": None}
 
 # 知识库分类 → wiki 子目录映射
 CATEGORY_DIR_MAP = {
@@ -189,6 +199,7 @@ def _generate_embeddings(kb_rows: list, dry_run: bool = False):
     """为知识库条目生成 embedding 并写回 SQLite（混合搜索用）"""
     if not kb_rows:
         return
+    _cur_entry_id = ""
     try:
         from db import LocalEmbedding
         encoder = LocalEmbedding()
@@ -201,6 +212,7 @@ def _generate_embeddings(kb_rows: list, dry_run: bool = False):
             emb = encoder.encode(text)
             if dry_run:
                 continue
+            _cur_entry_id = row.get("entry_id", "")
             c.execute(
                 "UPDATE knowledge_base SET embedding = ? WHERE entry_id = ?",
                 (emb.tobytes(), row["entry_id"]),
@@ -210,8 +222,15 @@ def _generate_embeddings(kb_rows: list, dry_run: bool = False):
         conn.close()
         if not dry_run:
             print(f"  [embedding] 已生成 {len(kb_rows)} 个向量")
+            EMBEDDING_SYNC_STATE.update(degraded=False, last_error=None)
     except Exception as e:
-        print(f"  [embedding] 失败: {e}")
+        # CD-055：不许 raise 打断整个 sync 批处理 —— 结构化日志 + 降级标记
+        EMBEDDING_SYNC_STATE["degraded"] = True
+        EMBEDDING_SYNC_STATE["failures"] += 1
+        EMBEDDING_SYNC_STATE["last_error"] = f"{type(e).__name__}: {e}"
+        logger.error(
+            "wiki_sync embedding 写回失败 entry_id=%s %s: %s（已降级，同步继续）",
+            _cur_entry_id, type(e).__name__, e)
 
 
 def _clean_orphans(kb_rows: list, mp_rows: list, dry_run: bool = False):
@@ -258,7 +277,7 @@ def _clean_orphans(kb_rows: list, mp_rows: list, dry_run: bool = False):
                     if not has_db_ref:
                         continue  # 手动创建的 wiki 页面，保留
                 except Exception as _exc:
-                    logger.debug("wiki_sync silent-except @257: %s", _exc)
+                    logger.debug("wiki_sync silent-except(_clean_orphans): %s", _exc)
 
                 if dry_run:
                     print(f"  [DRY-RUN] 将删除孤儿: {rel_path}")
@@ -432,6 +451,10 @@ def sync(dry_run: bool = False, force: bool = False, federate: bool = False):
                 "kind": kind,
                 "owner": owner,
                 "memory_id": memory_id,
+                # CD-054 wiki 组收编（T23，路线甲）：派生时刻快照源记忆级别，
+                # 作为读出口 min(页面自身级别, 源当前级别) 的「页面自身级别」锚点——
+                # 源下调实时跟随，源上调被快照压住不自动跟随（min 只降不升）。
+                "disclosure_level": (row.get("disclosure_level") or "summary"),
             },
         )
 
@@ -448,6 +471,9 @@ def sync(dry_run: bool = False, force: bool = False, federate: bool = False):
 
     # ===== 生成 embedding（混合搜索用） =====
     _generate_embeddings(kb_rows, dry_run)
+    # CD-055：embedding 降级标记透出到既有同步状态结构
+    # （sync() 返回值 → routes_wiki._wiki_sync_state["last_result"] → /sync/status）
+    stats["embedding_degraded"] = EMBEDDING_SYNC_STATE["degraded"]
 
     # ===== 清理孤儿页面 =====
     _clean_orphans(kb_rows, mp_rows, dry_run)
@@ -472,7 +498,7 @@ def sync(dry_run: bool = False, force: bool = False, federate: bool = False):
             inbox_conn.commit()
             inbox_conn.close()
         except Exception as _exc:
-            logger.debug("wiki_sync silent-except @471: %s", _exc)
+            logger.debug("wiki_sync silent-except(sync): %s", _exc)
 
     return stats
 
@@ -519,7 +545,7 @@ def _update_index(dry_run: bool = False):
                                         title = line.split(":", 1)[1].strip()
                                         break
                     except Exception as _exc:
-                        logger.debug("wiki_sync silent-except @518: %s", _exc)
+                        logger.debug("wiki_sync silent-except(_update_index): %s", _exc)
                     pages.append(f"- [[{title}]] ({rel})")
                     total += 1
 

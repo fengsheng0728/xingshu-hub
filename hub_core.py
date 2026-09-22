@@ -37,7 +37,7 @@ from hub_mixins.disclosure_ops import DisclosureOpsMixin
 from hub_mixins.ingest import IngestMixin
 from hub_mixins.knowledge import KnowledgeMixin
 from hub_mixins.maintenance import MaintenanceMixin
-from hub_mixins.memory import MemoryMixin
+from hub_mixins.memory import MemoryMixin, _vector_metadata
 from hub_mixins.notifications import NotificationsMixin
 from hub_mixins.tasks import TasksMixin
 from hub_mixins.team import TeamMixin
@@ -229,6 +229,154 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
                 print("[SyncHub] data-trunk 初始化失败（影子模式降级，不影响主链路）")
 
 
+        # CD-045: 审计 outbox 消费者（事务内事件行 → 异步落审计链；重启自动 replay）
+# CD-046: 注入 vector_fn —— vector_index 补偿事件经 _reindex_vector_sync 重灌索引
+# CD-047: 注入 shadow_fn —— shadow_mirror 事件经 _shadow_mirror_sync 读库内最新值重镜像
+        self._outbox_consumer = None
+        try:
+            from hub_mixins.outbox import OutboxConsumer
+            self._outbox_consumer = OutboxConsumer(
+                CONFIG.DB_PATH, vector_fn=self._reindex_vector_sync,
+                shadow_fn=self._shadow_mirror_sync,
+                shadow_delete_fn=self._shadow_delete_sync,
+                shadow_archive_fn=self._shadow_archive_sync)
+            self._outbox_consumer.start()
+        except Exception:
+            print("[SyncHub] 审计 outbox 消费者启动失败（事件行留表，重启后 replay）")
+
+    def _reindex_vector_sync(self, payload: dict) -> None:
+        """CD-046: vector_index 补偿事件的消费者回调（消费者线程直接调用，同步）。
+
+        用库内 embedding blob 重灌索引（不调模型）：
+        - op == "delete" 或库内查不到该 memory_id 或该行 embedding 为空
+          → collection.delete（不存在也不报错；顺带清掉 1A 历史残留的脏向量）
+        - 否则 → collection.upsert（metadata 键集合与写路径完全一致）
+        无向量栈（collection 为 None）→ 直接返回（降级，不报错）。
+        """
+        collection = self._chroma_collection
+        if collection is None:
+            return  # 降级：无向量栈
+        memory_id = (payload or {}).get("memory_id")
+        if not memory_id:
+            raise ValueError("vector_index 事件缺 memory_id")
+        row = None
+        if payload.get("op") != "delete":
+            conn = sqlite3.connect(CONFIG.DB_PATH)
+            try:
+                # CD-048: 补取 disclosure_level（metadata 新增 level 键）；
+                # content/summary 不再进向量 metadata（最小披露），SQL 不再取
+                row = conn.execute(
+                    "SELECT owner_agent_id, memory_key, embedding,"
+                    " importance, tags, kind, confidence, source_type, disclosure_level"
+                    " FROM memory_pool WHERE memory_id=?",
+                    (memory_id,)).fetchone()
+            finally:
+                conn.close()
+        if payload.get("op") == "delete" or row is None or not row[2]:
+            collection.delete(ids=[memory_id])
+            return
+        # CD-048: metadata 复用 memory._vector_metadata（与写路径/重建同键同值口径）
+        collection.upsert(
+            ids=[memory_id],
+            embeddings=[np.frombuffer(row[2], dtype=np.float32).tolist()],
+            metadatas=[_vector_metadata(
+                row[0], row[1], row[4],
+                row[3], row[5], row[6], row[7],
+                row[8] or "",
+            )],
+        )
+
+    def _shadow_mirror_sync(self, payload: dict) -> None:
+        """CD-047: shadow_mirror 事件的消费者回调（消费者线程直接调用，同步）。
+
+        事件里只记 memory_id（不打包快照）——这里从 memory_pool 读**当前最新值**
+        构造 payload 再 submit（天然解决"提交时刻快照陈旧"）：
+        - self._shadow is None → 直接返回（影子关闭时的既有降级语义）
+        - 库内行不存在 → 直接返回（被删除的记忆不补镜像；是否要"删除档案"
+          是另一件事，本轮不做，登记为边界）
+        - date 取库内 updated_at[:10]（**不用 datetime.now()**——跨天重镜像
+          若按新日期生成路径会再产出一份 vault 档案，旧日期文件残留）
+        镜像失败由影子自身的 pending/replay 兜底（G1 语义不动）。
+        """
+        if self._shadow is None:
+            return  # 降级：影子关闭
+        memory_id = (payload or {}).get("memory_id")
+        if not memory_id:
+            raise ValueError("shadow_mirror 事件缺 memory_id")
+        conn = sqlite3.connect(CONFIG.DB_PATH)
+        try:
+            row = conn.execute(
+                "SELECT owner_agent_id, memory_key, content, trust_level,"
+                " disclosure_level, tags, updated_at"
+                " FROM memory_pool WHERE memory_id=?",
+                (memory_id,)).fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return  # 已删除的记忆不补镜像
+        try:
+            tags = json.loads(row[5]) if row[5] else []
+        except Exception:
+            tags = []
+        self._shadow.submit("memory", {
+            "memory_id": memory_id,
+            "owner": row[0],
+            "memory_key": row[1],
+            "content": row[2],
+            "trust": row[3] or "internal",
+            "level": row[4] or "none",
+            "tags": tags,
+            "date": (row[6] or "")[:10],
+        })
+
+    def _shadow_delete_sync(self, payload: dict) -> None:
+        """T31: shadow_delete 事件消费侧——归档对应 vault 档案（禁止物理删除）。"""
+        if self.data_trunk is None:
+            return
+        memory_id = (payload or {}).get("memory_id")
+        if not memory_id:
+            raise ValueError("shadow_delete 事件缺 memory_id")
+        from hub_mixins.shadow.reconcile import archive_by_memory_id
+        archive_by_memory_id(self.data_trunk, memory_id,
+                             db_path=getattr(CONFIG, "DB_PATH", None))
+
+    def _shadow_archive_sync(self, payload: dict) -> None:
+        """T31: shadow_archive 事件消费侧——归档指定旧路径（跨天覆盖）。"""
+        if self.data_trunk is None:
+            return
+        memory_id = (payload or {}).get("memory_id")
+        old_path = (payload or {}).get("old_path")
+        if not memory_id or not old_path:
+            raise ValueError("shadow_archive 事件缺 memory_id 或 old_path")
+        from hub_mixins.shadow.reconcile import archive_by_path
+        archive_by_path(self.data_trunk, old_path, memory_id,
+                        db_path=getattr(CONFIG, "DB_PATH", None))
+
+    async def _shadow_reconcile_on_start(self, delay_sec: float):
+        """T31: 启动影子档案对账协程——延迟避开启动高峰；失败只告警，不阻塞启动。"""
+        try:
+            if delay_sec > 0:
+                await asyncio.sleep(delay_sec)
+            from hub_mixins.shadow.reconcile import reconcile_shadow_archives
+            stats = await asyncio.to_thread(
+                reconcile_shadow_archives, self.data_trunk,
+                db_path=getattr(CONFIG, "DB_PATH", None))
+            print(f"[SyncHub] 影子档案对账完成: {stats}")
+        except Exception as e:
+            print(f"[SyncHub] 影子档案对账失败（不影响启动）: {type(e).__name__}: {e}")
+
+    def schedule_shadow_reconcile(self) -> bool:
+        """T31: 启动影子档案对账钩子——读环境开关，开启则延迟对账。"""
+        try:
+            if os.environ.get("SYNC_HUB_SHADOW_RECONCILE_ON_START", "1") != "1":
+                return False
+            asyncio.create_task(
+                self._shadow_reconcile_on_start(10.0))
+            return True
+        except Exception as e:
+            print(f"[SyncHub] 影子档案对账调度失败（不影响启动）: {e}")
+            return False
+
     async def _ensure_embedding_model(self):
         """延迟加载 sentence-transformers 模型（避免启动阻塞）"""
         if self._chroma_client is None:
@@ -282,6 +430,10 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
             "default_manager_level": "summary",
             "orchestrator_max_level": "full",
             "allow_peer_disclosure": True,
+            # CD-033A（2026-09-17）：企业已发布内容（知识层，带 published 标记）
+            # 对全体已注册 Agent 可见到 SUMMARY；False = 退回"发布内容对非协作
+            # worker 不可见"的旧行为（仅 NONE→SUMMARY 提升，绝不降级）
+            "published_public": True,
         }
         try:
             import yaml, os
@@ -302,6 +454,57 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
         # 剥离老 config.yaml 中可能残留的键，防止「配置存在=有保护」错觉
         default.pop("require_approval_for_full", None)
         return default
+
+
+    @staticmethod
+
+
+    def _load_kb_reconcile_config() -> dict:
+        """CD-051: 知识向量对账开关（config.yaml knowledge 段）。
+
+        models.py 不在本任务改动白名单，故与 _load_disclosure_policy 同款直读
+        yaml：缺段/缺键/读取失败一律回落默认（on_start=true / delay=15s）。
+        """
+        cfg = {"reconcile_on_start": True, "reconcile_delay_sec": 15}
+        try:
+            import yaml, os
+            config_dir = os.environ.get("SYNC_HUB_CONFIG_DIR", "./config")
+            config_path = os.path.join(config_dir, "config.yaml")
+            if os.path.exists(config_path):
+                with open(config_path, "r", encoding="utf-8") as f:
+                    kb = (yaml.safe_load(f) or {}).get("knowledge", {}) or {}
+                if kb.get("reconcile_on_start") is not None:
+                    cfg["reconcile_on_start"] = bool(kb["reconcile_on_start"])
+                if kb.get("reconcile_delay_sec") is not None:
+                    cfg["reconcile_delay_sec"] = max(0, int(kb["reconcile_delay_sec"]))
+        except Exception as e:
+            print(f"[SyncHub] 加载知识对账配置失败 ({e})，使用默认值")
+        return cfg
+
+    async def _kb_reconcile_on_start(self, delay_sec: float):
+        """CD-051: 启动对账协程 — 延迟避开启动高峰与 embedding 模型首载竞争；
+        失败只告警（D4），绝不阻塞/中断启动。"""
+        try:
+            if delay_sec > 0:
+                await asyncio.sleep(delay_sec)
+            stats = await self.reconcile_kb_vectors()
+            print(f"[SyncHub] 知识向量对账完成: {stats}")
+        except Exception as e:
+            print(f"[SyncHub] 知识向量对账失败（不影响运行）: {type(e).__name__}: {e}")
+
+    def schedule_kb_reconcile(self) -> bool:
+        """CD-051: 启动对账钩子 — 读开关，开启则 create_task 延迟对账。
+        返回是否已调度；任何异常只 print，不影响调用方（启动链路）。"""
+        try:
+            cfg = self._load_kb_reconcile_config()
+            if not cfg["reconcile_on_start"]:
+                return False
+            asyncio.create_task(
+                self._kb_reconcile_on_start(cfg["reconcile_delay_sec"]))
+            return True
+        except Exception as e:
+            print(f"[SyncHub] 知识向量对账调度失败（不影响启动）: {e}")
+            return False
 
 
     async def _restore_agents(self):
@@ -335,6 +538,14 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
             conn2.commit()
             conn2.close()
             print(f"[SyncHub] 已从数据库恢复 {len(rows)} 个 Agent，status 已同步为 offline")
+
+        # CD-051: 知识向量对账启动钩子（开关/延迟见 config.yaml knowledge 段；
+        # 此处是 lifespan 首个 await 的 hub_core 函数，事件循环已就绪，
+        # 且与近期并行改动面（outbox 注入/披露策略加载）距离最远）
+        self.schedule_kb_reconcile()
+
+        # T31: 影子档案对账启动钩子
+        self.schedule_shadow_reconcile()
 
 
     def _db(self):
@@ -678,7 +889,7 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
                 "event", "events", str(_event_rowid),
                 {"event_type": event_type, "agent_id": agent_id, "payload": payload, "trace_id": tid})
         except Exception as _exc:
-            logger.warning("hub_core silent-except @651: %s", _exc)
+            logger.warning("hub_core silent-except(_log_event): %s", _exc)
 
 
     async def _log_disclosure(self, **kwargs):
@@ -734,7 +945,7 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
                 conn.commit()
                 conn.close()
             except Exception as _exc:
-                logger.debug("hub_core silent-except @707: %s", _exc)
+                logger.debug("hub_core silent-except(record_pong): %s", _exc)
 
 
     def is_agent_timed_out(self, agent_id: str) -> bool:
@@ -937,7 +1148,7 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
     # ============ 阶段4-B2 反哺精确去重合并（chunk_hash 档） ============
     # 执行器在 hub_mixins/shadow.py（ShadowWriter.execute_merge / undo_merge /
     # scan_and_merge）；本域负责 fail-closed 判定 + audit 双写
-    # （_log_event → events + audit_log，hub_core.py:538-569 既有双写模式）。
+    # （_log_event → events + audit_log，本类 _log_event 既有双写模式）。
     # fail-closed 红线：data_trunk.enabled=false 或 data_trunk.backfeed.enabled
     # 缺省 → 全部 no-op 返回 {"enabled": False}（与 DATA_TRUNK_ENABLED 语义一致）。
 
@@ -987,7 +1198,7 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
                 await self._log_event("backfeed_unmerge", actor,
                                       r.get("audit") or {"canonical_id": canonical_id})
             except Exception as _exc:
-                logger.warning("hub_core silent-except @960: %s", _exc)
+                logger.warning("hub_core silent-except(backfeed_undo_merge): %s", _exc)
         return r
 
     async def backfeed_scan_and_merge(self, kinds=None, dry_run: bool = False,
@@ -1039,7 +1250,7 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
                     await self._log_event("backfeed_merge", "system",
                                           m.get("audit") or {})
                 except Exception as _exc:
-                    logger.warning("hub_core silent-except @1012: %s", _exc)
+                    logger.warning("hub_core silent-except(backfeed_scan_cos_and_merge): %s", _exc)
         if not dry_run:
             for cand in r.get("review_candidates") or []:
                 pair = cand.get("pair") or []
@@ -1066,7 +1277,7 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
                 if all(f'"id": "{i}"' in (d or "") for i in ids):
                     return True
         except Exception as _exc:
-            logger.warning("hub_core silent-except @1039: %s", _exc)
+            logger.warning("hub_core silent-except(_pending_backfeed_pair): %s", _exc)
         return False
 
 

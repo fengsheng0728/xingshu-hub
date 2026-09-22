@@ -30,7 +30,7 @@ class PendingMixin:
                 try:
                     self._pend_db_conn.close()
                 except Exception as _exc:
-                    logger.debug("shadow silent-except @531: %s", _exc)
+                    logger.debug("shadow silent-except(_pend_close): %s", _exc)
                 self._pend_db_conn = None
 
     def _pending_insert(self, kind: str, payload: dict):

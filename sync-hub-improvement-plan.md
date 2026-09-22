@@ -186,6 +186,7 @@ H2 出口标准硬断言：**对审计库 grep 原始 PII 串必须零命中**�
    模型就位后 `pytest -m requires_sentence_model` 一条命令出验收结论（测试先于证据）。
 2. **rebuild 上线时机**：维度切换期间检索走 ILIKE 降级（功能可用但质量下降），
    必须选业务低峰执行；执行前先 `hub-cli backup`（迭代 1 产物），失败可回滚。
+   rebuild 前先 `python hub_cli.py backup --out <dir>` 并选低峰执行（CD-052：重建窗口检索 fail-closed）。
 ### K2 实体抽取
 
 铁律（冻结）：

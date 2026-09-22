@@ -16,6 +16,7 @@ from routes_common import (
     NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
     _scope_client_ip, get_current_agent, get_current_agent_optional,
 )
+from routes_common import require_role  # CD-074（hub_token 放行的 canonical 角色门）
 
 router = APIRouter()
 
@@ -73,12 +74,10 @@ async def api_schedule_task(
     current_agent: str = Depends(get_current_agent),
 ):
     """调度任务，匹配 Agent，执行第一阶段渐进披露"""
+    role = "worker"
     if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        role = info.get("role", "worker")
-        if role not in ("manager", "orchestrator"):
-            raise HTTPException(status_code=403,
-                detail=f"Forbidden: {current_agent} 角色 {role} 无权执行此操作")
+        role = (hub.agents.get(current_agent, {}) or {}).get("role", "worker")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator",), detail=f"Forbidden: {current_agent} 角色 {role} 无权执行此操作")
     return await hub.schedule_task(task_id)
 
 
@@ -162,12 +161,10 @@ async def api_update_task(
     current_agent: str = Depends(get_current_agent),
 ):
     """更新任务描述/依赖（看板编辑；P1: depends_on 可选 JSON 数组字符串，如 "[taskA]"）"""
+    role = "worker"
     if not NO_AUTH:
-        info = hub.agents.get(current_agent, {})
-        role = info.get("role", "worker")
-        if role not in ("manager", "orchestrator", "worker"):
-            raise HTTPException(status_code=403,
-                detail=f"Forbidden: {current_agent} 角色 {role} 无权执行此操作")
+        role = (hub.agents.get(current_agent, {}) or {}).get("role", "worker")
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH, roles=("manager", "orchestrator", "worker",), detail=f"Forbidden: {current_agent} 角色 {role} 无权执行此操作")
     deps = None
     if depends_on is not None:
         try:

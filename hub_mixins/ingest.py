@@ -294,6 +294,10 @@ class IngestMixin:
 
         幂等：重复调用只处理 embedding 为空或维度不匹配的行（stale 标记语义）。
         document_chunks 不存 embedding blob（H1 表无此列）→ 不参与重建。
+        K-1（2026-09-16）：chroma 清空段会连知识向量一起重建（layer=knowledge，
+        由 knowledge_base.content 现切现编码，与 knowledge_upsert 写侧同口径）。
+        CD-052（2026-09-19，用户修正 4）：全程置位 self._index_rebuilding
+        重建窗口标记（try/finally 保证复位），置位期间检索 fail-closed。
         """
         from db import get_embedding_provider
         import numpy as _np
@@ -308,6 +312,29 @@ class IngestMixin:
             return {"status": "error", "detail": f"模型加载失败: {e}",
                     "hint": "检索将保持 ILIKE 降级"}
 
+        # CD-052（用户修正 4）: 重建窗口标记——置位期间知识/语义检索 fail-closed
+        # （disclosure._semantic_search_impl / _chroma_search / _knowledge_hit
+        # 判此标记，绝不回退任何仍含明文的旧路径）；try/finally 保证任何
+        # 异常路径都复位。低峰执行 + 先备份的运维规程见附录 F。
+        self._index_rebuilding = True
+        try:
+            return await self._rebuild_embeddings_body(model, provider,
+                                                       requester, batch_size)
+        finally:
+            self._index_rebuilding = False
+
+    async def _rebuild_embeddings_body(self, model, provider, requester,
+                                       batch_size):
+        """rebuild_embeddings 的「维度探测 + 主数据事务 + ChromaDB 清库重建 +
+        审计」段（CD-052 为套重建窗口 try/finally 而逐字搬出，逻辑未改）。
+
+        CD-052 固化「清库重建」语义为可断言性质：先 delete 清空整集合
+        （{"owner": {"$ne": "__none__"}} 对缺 owner 键的知识 chunk 同样命中，
+        chromadb $ne 语义），再按 DB 现存条目重灌 → 孤儿天然不残留
+        （tests/test_cd052_kb_minimal_disclosure.py S-6a 锚定）。不得改成
+        增量刷新。document_chunks 无 embedding 列、不参与 chroma（现状不变）。
+        """
+        import numpy as _np  # 原 rebuild_embeddings 内联局部导入，随体段一并搬入
         try:
             probe = model.encode("维度探测")
             target_dim = int(len(probe))
@@ -325,30 +352,60 @@ class IngestMixin:
 
         # ChromaDB 重建（清空重建，用新向量重灌）
         try:
-            if self._chroma_collection is not None and rebuilt > 0:
+            # K-1: 知识行先查——memory_pool 为空（rebuilt=0）但有知识条目时，
+            # 知识向量也必须重建（否则换模型后知识向量维度静默滞留）
+            kb_rows = []
+            if self._chroma_collection is not None:
+                kb_rows = await db_facade.query(
+                    "SELECT entry_id, title, content, category, importance FROM knowledge_base WHERE content IS NOT NULL AND content != ''")
+            if self._chroma_collection is not None and (rebuilt > 0 or kb_rows):
                 # delete 需要非空 where（chromadb 限制：空 where 抛 ValueError）
                 self._chroma_collection.delete(where={"owner": {"$ne": "__none__"}})
                 # D-11: 门面查询（原 _db() 直连；row_factory=Row 语义一致）
+                # CD-048: 补取 disclosure_level 列（metadata 新增 level 键）；
+                # content/summary 不再进向量 metadata（最小披露），SQL 不再取
                 rows = await db_facade.query(
-                    "SELECT memory_id, owner_agent_id, memory_key, content, summary, importance, kind, confidence, source_type, tags, embedding FROM memory_pool WHERE embedding IS NOT NULL")
+                    "SELECT memory_id, owner_agent_id, memory_key, importance, kind, confidence, source_type, tags, embedding, disclosure_level FROM memory_pool WHERE embedding IS NOT NULL")
+                # CD-048: 与写路径/补偿重灌统一复用 memory._vector_metadata（同键同值口径）
+                from hub_mixins.memory import _vector_metadata
                 batch_ids, batch_embs, batch_meta = [], [], []
                 for row in rows:
                     batch_ids.append(row["memory_id"])
                     batch_embs.append(_np.frombuffer(row["embedding"], dtype=_np.float32).tolist())
                     # ChromaDB metadatas 不允许 None（None 值转 MetadataValue 失败）
-                    batch_meta.append({
-                        "owner": row["owner_agent_id"] or "",
-                        "key": row["memory_key"] or "",
-                        "content": (row["content"] or "")[:500],
-                        "summary": row["summary"] or "",
-                        "importance": float(row["importance"] or 0.0),
-                        "kind": row["kind"] or "",
-                        "confidence": float(row["confidence"] or 0.0),
-                        "source_type": row["source_type"] or "",
-                        "tags": json.dumps(json.loads(row["tags"] or "[]")),
-                    })
+                    batch_meta.append(_vector_metadata(
+                        row["owner_agent_id"] or "",
+                        row["memory_key"] or "",
+                        json.dumps(json.loads(row["tags"] or "[]")),
+                        float(row["importance"] or 0.0),
+                        row["kind"] or "",
+                        float(row["confidence"] or 0.0),
+                        row["source_type"] or "",
+                        row["disclosure_level"] or "",
+                    ))
                 if batch_ids:
                     self._chroma_collection.add(ids=batch_ids, embeddings=batch_embs, metadatas=batch_meta)
+
+                # K-1: 知识条目同集合重建（layer=knowledge）。
+                # document_chunks 不存 embedding blob（H1 表无此列）→ 仍不参与；
+                # 知识侧向量由 knowledge_base.content 现切现编码（与写侧同一切片口径）。
+                from chunker import chunk_document
+                from hub_mixins.knowledge import kb_chunk_id, kb_chunk_metadata
+                _kb_max = getattr(CONFIG, "KB_EMBED_MAX_CHUNKS", 200)
+                for krow in kb_rows:
+                    kchunks = chunk_document(f"kb:{krow['entry_id']}", krow["content"],
+                                             embed_fn=None)[:_kb_max]
+                    if not kchunks:
+                        continue
+                    kvecs = model([c["content"] for c in kchunks])
+                    self._chroma_collection.add(
+                        ids=[kb_chunk_id(krow["entry_id"], c["piece_index"]) for c in kchunks],
+                        embeddings=[_np.asarray(kvecs[j], dtype=_np.float32).tolist()
+                                    for j in range(len(kchunks))],
+                        metadatas=[kb_chunk_metadata(krow["entry_id"], krow["title"],
+                                                     krow["category"], krow["importance"], c)
+                                   for c in kchunks],
+                    )
         except Exception as e:
             # Chroma 重建失败不影响 SQLite 主数据（向量是冗余索引）
             print(f"[K1b] ChromaDB 重建失败（SQLite 主数据已更新）: {e}")

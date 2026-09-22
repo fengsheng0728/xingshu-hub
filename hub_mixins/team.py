@@ -216,7 +216,7 @@ class TeamMixin:
             await asyncio.to_thread(_fetch_url_sync, req, 5)
         except Exception as _exc:
             # 对方离线——撤销队列在 3.5 节设计，当前版本记录到 log 等后续重试
-            logger.warning("team silent-except @216: %s", _exc)
+            logger.warning("team silent-except(remove_team_member): %s", _exc)
 
         await self._log_event("team_removed", agent_id, {"member_id": member_id, "remote_hub": remote_hub_id})
         return {"status": "removed", "remote_hub_id": remote_hub_id}

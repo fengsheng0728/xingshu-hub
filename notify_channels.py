@@ -120,7 +120,7 @@ def _smtp_send(cfg: dict, title: str, body: str, extra: dict) -> dict:
         try:
             server.quit()
         except Exception as _exc:
-            logger.debug("notify_channels silent-except @122: %s", _exc)
+            logger.debug("notify_channels silent-except(_smtp_send): %s", _exc)
     return {"status": "ok"}
 
 

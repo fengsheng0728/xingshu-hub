@@ -126,8 +126,8 @@ task_id = f"p0task{int(time.time())}"
 r = hub_call("POST", "/api/v1/tasks/create", {
     "task_id": task_id, "description": f"P0验证任务 {task_id}", "creator_agent_id": AGENT_ID})
 check("S3 建任务", r.get('status') in ('created', 'ok') or 'task_id' in r or 'error' not in r, json.dumps(r, ensure_ascii=False)[:120])
-# 派发（manager 角色才有权——用 demo-cs-01）
-r = hub_call("POST", f"/api/v1/tasks/{task_id}/schedule", agent_id="demo-cs-01")
+# 派发（manager 角色才有权——用 fushi-cs-zero）
+r = hub_call("POST", f"/api/v1/tasks/{task_id}/schedule", agent_id="fushi-cs-zero")
 check("S3 派发任务", 'error' not in r or r.get('http_error') != 403, json.dumps(r, ensure_ascii=False)[:150])
 
 # Agent 处理任务：chat 让它开始并完成
@@ -147,7 +147,7 @@ import urllib.parse
 notif_title = f"P0通知{int(time.time())}"
 before_frames = len(stderr_frames)
 enc = urllib.parse.quote(notif_title)
-r = hub_call("POST", f"/api/v1/notifications/create?agent_id={AGENT_ID}&title={enc}&body=p0-body", agent_id="demo-cs-01")
+r = hub_call("POST", f"/api/v1/notifications/create?agent_id={AGENT_ID}&title={enc}&body=p0-body", agent_id="fushi-cs-zero")
 check("S4 通知创建", 'http_error' not in r, json.dumps(r, ensure_ascii=False)[:120])
 time.sleep(3)
 # stderr 应出现推送帧

@@ -113,7 +113,7 @@ def _daily_report_stats_sync() -> dict:
             for tag in json.loads(tags_str):
                 tag_counts[tag] = tag_counts.get(tag, 0) + 1
         except Exception as _exc:
-            logger.debug("routes_report silent-except @114: %s", _exc)
+            logger.debug("routes_report silent-except(_daily_report_stats_sync): %s", _exc)
     top_tags = sorted(tag_counts.items(), key=lambda x: x[1], reverse=True)[:5]
 
     # 知识库

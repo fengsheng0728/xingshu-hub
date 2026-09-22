@@ -42,13 +42,14 @@ RULES: List[dict] = [
     {"id": "r1_self", "priority": 1, "name": "自己查自己", "desc": "requester == owner → FULL"},
     {"id": "r2_whitelist", "priority": 2, "name": "白名单", "desc": "requester ∈ allowed_viewers → FULL"},
     {"id": "r2b_group_intersect", "priority": 3, "name": "组交集", "desc": "requester 组 ∩ owner 组非空 → SUMMARY（S1 身份接入）"},
-    {"id": "r3_mem_none", "priority": 4, "name": "记忆 NONE 阻断", "desc": "记忆自身 disclosure_level == NONE → NONE"},
-    {"id": "r5_manager_subordinate", "priority": 5, "name": "主管看下属", "desc": "manager/orchestrator 且 owner ∈ managed_agents → 按 default_manager_level"},
-    {"id": "r6_orchestrator_global", "priority": 6, "name": "店长全局", "desc": "orchestrator → orchestrator_max_level"},
-    {"id": "r7_peer_collab", "priority": 7, "name": "同级协作", "desc": "worker×worker 同部门/同任务 → SUMMARY，否则 NONE"},
-    {"id": "r8_mem_level_cap", "priority": 8, "name": "记忆级别上限", "desc": "required > mem_level → 截断到 mem_level"},
-    {"id": "r9_sensitivity_cap", "priority": 9, "name": "敏感度写入打标", "desc": "写入时敏感度链(fail-closed: trust/PII/机密词/角色/父级/类型)定存储级别，读取时由 r8 消费 → min(请求方判定, 存储级别)（H2，附录 E v1.4）"},
-    {"id": "r10_default_none", "priority": 10, "name": "默认不披露", "desc": "兜底 → NONE"},
+    {"id": "r4_published_public", "priority": 4, "name": "企业已发布公共区", "desc": "已发布内容（知识层/手写页，带 published 标记）对全体已注册 Agent 可见到 SUMMARY；仅从 NONE 提升，不降级；开关 disclosure.published_public"},
+    {"id": "r3_mem_none", "priority": 5, "name": "记忆 NONE 阻断", "desc": "记忆自身 disclosure_level == NONE → NONE"},
+    {"id": "r5_manager_subordinate", "priority": 6, "name": "主管看下属", "desc": "manager/orchestrator 且 owner ∈ managed_agents → 按 default_manager_level"},
+    {"id": "r6_orchestrator_global", "priority": 7, "name": "店长全局", "desc": "orchestrator → orchestrator_max_level"},
+    {"id": "r7_peer_collab", "priority": 8, "name": "同级协作", "desc": "worker×worker 同部门/同任务 → SUMMARY，否则 NONE"},
+    {"id": "r8_mem_level_cap", "priority": 9, "name": "记忆级别上限", "desc": "required > mem_level → 截断到 mem_level"},
+    {"id": "r9_sensitivity_cap", "priority": 10, "name": "敏感度写入打标", "desc": "写入时敏感度链(fail-closed: trust/PII/机密词/角色/父级/类型)定存储级别，读取时由 r8 消费 → min(请求方判定, 存储级别)（H2，附录 E v1.4）"},
+    {"id": "r10_default_none", "priority": 11, "name": "默认不披露", "desc": "兜底 → NONE"},
 ]
 
 
@@ -184,6 +185,11 @@ def simulate(
             creator = task.get("creator_agent_id", "")
             if requester in (assigned, creator) or owner in (assigned, creator):
                 return DisclosureLevel.SUMMARY, "r7_peer_collab"
+        # r4_published_public（CD-033A 2026-09-17，镜像 disclosure.py 规则 7 链尾）：
+        # 仅当本将判 NONE + 带 published 标记 + 开关开 → 提升 SUMMARY。
+        # 只提升不降级：此处只可能接到 NONE；记忆行无 published 标记 → 天然不触发。
+        if memory.get("published") is True and policy.get("published_public", True):
+            return DisclosureLevel.SUMMARY, "r4_published_public"
         return DisclosureLevel.NONE, "r7_peer_collab"
 
     # r8 记忆级别上限
@@ -196,6 +202,10 @@ def simulate(
         return mem_level, "r8_mem_level_cap"
 
     # r9 敏感度打标（写入时已定存储级别，此处由 r8 消费；说明性存在）
+    # r4_published_public（CD-033A，镜像 disclosure.py 默认兜底链尾）：
+    # 走到这里 = 前面所有规则未放行，只可能从 NONE 提升，语义同 r7 链尾
+    if memory.get("published") is True and policy.get("published_public", True):
+        return DisclosureLevel.SUMMARY, "r4_published_public"
     # r10 默认不披露
     return DisclosureLevel.NONE, "r10_default_none"
 

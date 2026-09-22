@@ -41,7 +41,7 @@ async def api_server_get_config():
         auth_enabled = cfg.get("auth", {}).get("enabled", True)
         ui_new = bool(cfg.get("ui", {}).get("new", False))
     except Exception as _exc:
-        logger.debug("routes_server silent-except @40: %s", _exc)
+        logger.debug("routes_server silent-except(api_server_get_config): %s", _exc)
     return {
         "host": host,
         "port": port,
