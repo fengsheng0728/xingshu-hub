@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from pydantic import BaseModel as PydanticBase, Field as PydanticField
 
 from deps import check_windows_firewall, get_lan_ips
-from models import CONFIG
+from models import CONFIG, HUB_VERSION
 import db_facade
 from hub_core import hub, hub_agent
 from notifications import notifications
@@ -103,7 +103,7 @@ async def health():
     """深度健康检查：数据库、任务队列、内存池、磁盘、ChromDB、运行时长"""
     checks = {
         "status": "ok",
-        "version": "2.0.0",
+        "version": HUB_VERSION,
         "uptime_seconds": round(time.time() - hub._start_time, 1),
     }
 
@@ -249,7 +249,7 @@ async def health():
 @router.get("/healthz")
 async def healthz():
     """存活探针 — 进程活着即 200。"""
-    return {"status": "alive", "version": "2.0.0", "uptime_seconds": round(time.time() - hub._start_time, 1)}
+    return {"status": "alive", "version": HUB_VERSION, "uptime_seconds": round(time.time() - hub._start_time, 1)}
 
 
 @router.get("/readyz")

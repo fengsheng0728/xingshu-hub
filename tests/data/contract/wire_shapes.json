@@ -1,0 +1,106 @@
+{
+  "envelope_dispatch": {
+    "id": "str",
+    "payload": {
+      "method": "str"
+    },
+    "session_id": "str",
+    "ts": "int",
+    "type": "str",
+    "version": "int",
+    "via": "str"
+  },
+  "envelope_hello": {
+    "id": "str",
+    "payload": {
+      "agent_id": "str",
+      "last_checkpoint_id": "str"
+    },
+    "session_id": "str",
+    "ts": "int",
+    "type": "str",
+    "version": "int",
+    "via": "str"
+  },
+  "memory_list": {
+    "memories": [
+      "<list>",
+      {
+        "access_count": "int",
+        "confidence": "float",
+        "content": "str",
+        "created_at": "str",
+        "kind": "str",
+        "memory_id": "str",
+        "memory_key": "str",
+        "source_type": "str",
+        "summary": "str",
+        "updated_at": "str"
+      }
+    ],
+    "total": "int"
+  },
+  "memory_search": {
+    "degraded": "bool",
+    "degraded_reason": "str",
+    "embedding_unavailable": "bool",
+    "keyword_path": "null",
+    "results": [
+      "<list>",
+      {
+        "access_count": "int",
+        "confidence": "float",
+        "content": "str",
+        "disclosure_level": "str",
+        "kind": "str",
+        "memory_id": "str",
+        "memory_key": "str",
+        "owner_agent_id": "str",
+        "score": "float",
+        "source_type": "str",
+        "summary": "str"
+      }
+    ],
+    "total": "int"
+  },
+  "memory_store": {
+    "action": "str",
+    "confidence": "float",
+    "disclosure_level": "null",
+    "locked": "bool",
+    "memory_id": "str",
+    "sensitivity": "null",
+    "source_type": "str",
+    "status": "str"
+  },
+  "memory_versions": {
+    "memory_key": "str",
+    "versions": [
+      "<list>",
+      null
+    ]
+  },
+  "register": {
+    "agent_id": "str",
+    "api_key": "str",
+    "status": "str"
+  },
+  "task_cancel": {
+    "status": "str",
+    "task_id": "str"
+  },
+  "task_create": {
+    "disclosure_plan": {
+      "phases": [
+        "<list>",
+        {
+          "level": "str",
+          "phase": "int",
+          "trigger": "str"
+        }
+      ]
+    },
+    "status": "str",
+    "task_id": "str"
+  }
+}

@@ -3,7 +3,9 @@
 #
 # 钉版说明：以下版本以 2026-09-09 本机（Python 3.14）pip freeze 实测可运行版本为基准，
 # 用 ~= 锁定兼容范围（允许补丁级升级，禁止跨次版本漂移）。
-# Dockerfile 中的旧 pin（fastapi==0.104.1 等）需另行对齐（另一任务），本文件未同步。
+# CD-076（2026-09-22）更正：本文件此前写「Dockerfile 中的旧 pin（fastapi==0.104.1 等）需另行对齐」——
+# 该描述已过时：Dockerfile 现无任何 pip pin，直接 `pip install -r requirements.txt -r requirements-vector.txt`，
+# 基础镜像已于同日对齐到 python:3.14-slim（与本节钉版基准一致）。
 
 # Web 框架
 fastapi~=0.136.3

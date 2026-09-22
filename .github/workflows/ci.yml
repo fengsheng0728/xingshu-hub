@@ -6,6 +6,44 @@ on:
   pull_request:
 
 jobs:
+  # CD-079（2026-09-22）：接入契约的**线上行为**门禁。
+  # 契约测试分两层：结构层在 tests/test_integration_contract.py（随上面的全量回归跑，
+  # 锁信封形状/端点存在性/默认值/WS 首帧码）；本 job 补**真连通那一层**——
+  # 起隔离 Hub 实例，按接入方的真实姿势走一遍（状态码、首帧鉴权、数据写读闭环）。
+  # 两条脚本都是自包含的：自己建临时 config/库/chroma 与独立端口，且开 SYNC_HUB_DB_GUARD=1
+  # （解析到仓库根的生产库即 RuntimeError），不需要外部服务、不依赖本机 config.yaml。
+  contract-live:
+    name: 接入契约线上行为（quickstart + 负向语义）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt -r requirements-vector.txt pytest
+
+      # 接入方视角的最小可跑路径：注册 → REST 读写 → WS 首帧鉴权/hello/ping-pong/request
+      # 退出码 0 = 全绿；失败即红（脚本自己会打印 [FAIL] 行与 Hub 侧留痕）
+      - name: quickstart 真跑（隔离实例）
+        run: bash scripts/contract_e2e_quickstart.sh
+
+      # 契约文档 §1/§2/§4 写死的负向语义：7 条断言，**每条都带正向对照**
+      # （只验「红灯」不验「同条件下绿灯」会被中间件整体 401 之类的巧合骗过去）
+      - name: 契约负向语义（7 条，带正向对照）
+        run: bash scripts/contract_negative_probe.sh
+
+      - name: 失败时打印 Hub 侧日志（仅失败时）
+        if: failure()
+        run: |
+          for d in .contract-e2e/hub-e2e .contract-e2e/hub-neg; do
+            echo "──── $d/hub.log ────"
+            tail -60 "$d/hub.log" 2>/dev/null || echo "(无日志)"
+          done
+
   test:
     name: 全量回归（离线集）
     runs-on: windows-latest
@@ -39,12 +77,28 @@ jobs:
           echo "CI 离线集回归完成（详细统计见上一步输出）"
 
   docker-build:
-    name: Docker 镜像构建 + compose 校验
+    name: Docker 镜像构建 + compose 校验 + 持久化演练
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 真实构建纳入 CI：本机开发环境 Docker 引擎不可用，此 job 是 docker build 唯一实跑点
+      # CD-076（2026-09-22）：Dockerfile 新增构建期门禁 —— 缺 dashboard_dist/index.html 直接失败。
+      # 该目录被 .gitignore 忽略（hub_ui 构建产物），故 CI 必须先构建前端，
+      # 否则镜像里只剩旧 dashboard/（单页控制台）。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: hub_ui/package-lock.json
+
+      - name: 构建新控制台产物（hub_ui → ../dashboard_dist）
+        working-directory: hub_ui
+        run: npm ci && npm run build
+
+      # 真实构建纳入 CI：本机曾因 Windows「虚拟机平台」未启用而拿不到 Docker 引擎；2026-09-22
+      # 该组件启用并重启后本机已可实跑（docker build / compose config / 持久化演练三项均已在
+      # 本地取到证据，见 docs/cd076-deploy-acceptance.md §6）——本 job 由「唯一实跑点」变为
+      # 「第二实跑点 + 回归保障」，仍保留（换机/回滚场景的唯一保障）
       - name: 构建镜像（不 push）
         run: docker build -t xingshu-hub:ci .
 
@@ -52,6 +106,19 @@ jobs:
       - name: docker compose config 校验
         run: docker compose config --quiet
 
-      # 取舍说明：不做 docker run + health 冒烟——镜像含 chromadb/sentence-transformers
-      # 等重依赖，容器首次启动需拉模型/建库，耗时不可控；build + config 校验已覆盖
-      # Dockerfile 语法、依赖安装与 compose 语法三类本任务书修复点。
+      # CD-076 核心判据（灾难级）：起容器写数据 → down 销毁容器 → 再起 → 读回。
+      # 判据不是「配置对不对」，而是「重建容器后数据仍在」。复用上面构建的镜像，不二次 build。
+      - name: 持久化演练 —— 重建容器后数据仍在（CD-076）
+        env:
+          DRILL_IMAGE: xingshu-hub:ci
+        run: bash scripts/deploy_persistence_drill.sh
+
+      # 演练失败时把容器日志捞出来（runner 是临时的，不捞就没了）
+      - name: 失败时导出容器日志（仅失败时）
+        if: failure()
+        run: docker compose -p xingshu-drill logs --tail 200 2>&1 | tail -200 || true
+
+      # 取舍说明（2026-09-22 更新）：原「不做 docker run 冒烟」的理由已被上面的演练取代——
+      # 演练会真起容器并轮询 /health（超时 300s），已覆盖「镜像能跑起来」这一层；
+      # build + config 校验 + 持久化演练三类证据合计覆盖 Dockerfile 语法、依赖安装、
+      # compose 语义与数据落点四类修复点。

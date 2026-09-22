@@ -14,6 +14,15 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 
+# ============ 产品版本（单一来源）============
+# CD-076（2026-09-22）：版本号原硬编码在三处——routes.py 的 FastAPI app、routes_server.py
+# 的 /health 与 /healthz（三处同为旧版本号，而内容已到 2.1）。各写字符串必然漂移，
+# 改为唯一定义在此，对外出口一律 import 本常量（行号引用会被 test_code_hygiene 的 H-3 拦下，
+# 故此处只写符号名）。改版本只改这一行。
+# 改版本只改这一行。
+HUB_VERSION = "2.1.0"
+
+
 # ============ 披露级别枚举 ============
 class DisclosureLevel(str, Enum):
     """披露级别：从无到完整，逐级递增"""

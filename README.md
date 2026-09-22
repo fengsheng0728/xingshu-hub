@@ -82,7 +82,12 @@ python examples/demo_workflow.py
 | `POST /api/v1/tasks/create` | 创建任务 |
 | `POST /api/v1/tasks/{id}/advance` | 提升披露级别 |
 | `GET /api/v1/dashboard` | 监控面板数据 |
-| `WS /ws/{agent_id}` | WebSocket 实时推送 |
+| `WS /ws/{agent_id}` | WebSocket 实时推送（首帧 `{"type":"auth","token":...}` 鉴权） |
+
+> **接入方（第三方系统 / 其他 Agent）请直接读 `docs/integration-contract.md`**：认证两条路（注册拿 `api_key` /
+> 发受限钥匙）、WS 首帧鉴权与帧类型、错误语义（含「存在性与无权同响应」）、配额与限流、
+> **幂等责任在接入方**（Hub 在 `hello` 时按 checkpoint 重放未确认派单、**不去重**，接入方按 `dispatch_id` 自己保证幂等）、
+> 已知限制与版本承诺，一次讲完。可跑示例：`bash examples/quickstart.sh`（注册 → REST 读写 → WS，退出码 0 = 全绿）。
 
 ## 披露级别
 
@@ -116,11 +121,34 @@ python examples/demo_workflow.py
 python main.py
 
 # Docker（20-50 Agent）
-docker-compose up -d
+docker compose up -d
 
 # PyInstaller 打包（无需 Python 环境）
 python build_hub.py
 ```
+
+### Docker 部署要点（CD-076，2026-09-22）
+
+- **数据都在 `hub-data` 卷里**：`/app/data` 下放 DB、`chroma_db`、`wiki`、`audit`、`ystore.db`、`config`
+  （经 `SYNC_HUB_*` 环境变量指向，见 `docker-compose.yml`）。
+  `docker compose down` / 换镜像 / 重建容器都不会丢数据——**但 `down -v` 会删卷，别用它**。
+- **首次部署把配置放进卷里**（不放则用内置默认值启动，受管注册与控制台凭据不可用）：
+
+  ```bash
+  docker compose run --rm --entrypoint sh sync-hub \
+    -c 'mkdir -p /app/data/config && cp /app/config.example.yaml /app/data/config/config.yaml'
+  # 然后编辑卷内 config.yaml（填 auth.hub_token 等），再 docker compose up -d
+  ```
+
+- **构建镜像前先构建前端**：镜像内含新控制台 `dashboard_dist/`（12 页），
+  该目录是构建产物、不入库，缺失时 `docker build` 会直接报错退出：
+
+  ```bash
+  cd hub_ui && npm install && npm run build   # 产物落 ../dashboard_dist
+  ```
+
+- 端口可用 `HUB_PORT` 覆盖（如 `HUB_PORT=3077 docker compose up -d`），容器名用 `HUB_CONTAINER_NAME` 覆盖。
+- 验收脚本：`bash scripts/deploy_persistence_drill.sh`（起容器写数据 → 销毁 → 重建 → 读回）。
 
 ## Agent 端协同能力（第一波）
 

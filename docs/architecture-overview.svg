@@ -1,0 +1,262 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="1080" viewBox="0 0 1440 1080" font-family="JetBrains Mono, Consolas, Menlo, monospace">
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.5"/>
+    </pattern>
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+    <marker id="arrRose" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fb7185"/>
+    </marker>
+    <marker id="arrAmber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#fbbf24"/>
+    </marker>
+    <marker id="arrEmerald" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#34d399"/>
+    </marker>
+  </defs>
+
+  <rect width="1440" height="1080" fill="#020617"/>
+  <rect width="1440" height="1080" fill="url(#grid)"/>
+
+  <!-- ─── header ─── -->
+  <circle cx="40" cy="44" r="4" fill="#34d399"/>
+  <text x="58" y="49" fill="#e2e8f0" font-size="22" font-weight="700">星枢 Sync Hub · 架构总览</text>
+  <text x="58" y="70" fill="#94a3b8" font-size="11">写入隔离 · 按需披露 · 渐进披露 · 层级管控 · 完整审计　|　v2.1.0　|　2026-09-22</text>
+  <text x="1400" y="49" fill="#64748b" font-size="10" text-anchor="end">一份真相源 + 三个派生侧 + 一条独立审计链</text>
+  <text x="1400" y="68" fill="#64748b" font-size="10" text-anchor="end">docs/architecture-overview.svg</text>
+
+  <!-- ─── arrows (drawn early, behind boxes) ─── -->
+  <g stroke="#64748b" stroke-width="1.4" fill="none">
+    <!-- 接入者 → 入口面：四条一一对齐（不落在卡片缝里） -->
+    <path d="M 155 156 L 155 172" marker-end="url(#arr)"/>
+    <path d="M 405 156 L 405 172" marker-end="url(#arr)"/>
+    <path d="M 655 156 L 655 172" marker-end="url(#arr)"/>
+    <path d="M 905 156 L 905 172" marker-end="url(#arr)"/>
+    <!-- 入口面 → 装配层 → 领域层 → 数据层（主链垂直贯通） -->
+    <path d="M 530 234 L 530 266" marker-end="url(#arr)"/>
+    <path d="M 530 342 L 530 356" marker-end="url(#arr)"/>
+    <path d="M 530 482 L 530 496" marker-end="url(#arr)"/>
+    <!-- 主库写入与事件同事务入队 -->
+    <path d="M 175 606 L 175 636" marker-end="url(#arr)"/>
+  </g>
+  <g stroke="#34d399" stroke-width="1.3" fill="none" stroke-dasharray="5,3">
+    <!-- outbox 消费者推进派生侧（方向向上：从 outbox 回到派生存储） -->
+    <path d="M 300 636 L 320 610" marker-end="url(#arrEmerald)"/>
+    <path d="M 470 636 L 660 610" marker-end="url(#arrEmerald)"/>
+  </g>
+  <g stroke="#fb7185" stroke-width="1.3" fill="none" stroke-dasharray="4,4">
+    <path d="M 1080 400 L 1030 400" marker-end="url(#arrRose)"/>
+  </g>
+
+  <!-- ─── security boundary frame ─── -->
+  <rect x="30" y="240" width="1080" height="400" rx="12" fill="none" stroke="#fb7185" stroke-width="1" stroke-dasharray="8,5" opacity="0.55"/>
+  <text x="46" y="258" fill="#fb7185" font-size="10">安全边界：所有入口都必须过这里 —— 统一中间件 → 角色门 → 内容级披露剥离 → 端点硬边界</text>
+
+  <!-- ─── row A: accessors ─── -->
+  <text x="40" y="104" fill="#64748b" font-size="10">接入者</text>
+  <g>
+    <rect x="40" y="110" width="230" height="44" rx="6" fill="#0f172a"/><rect x="40" y="110" width="230" height="44" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="56" y="130" fill="#e2e8f0" font-size="12">外部集成方</text><text x="56" y="146" fill="#94a3b8" font-size="9">受限钥匙：endpoints·methods·level_cap</text>
+
+    <rect x="290" y="110" width="230" height="44" rx="6" fill="#0f172a"/><rect x="290" y="110" width="230" height="44" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="306" y="130" fill="#e2e8f0" font-size="12">其他 Agent</text><text x="306" y="146" fill="#94a3b8" font-size="9">register → api_key（首次明文）</text>
+
+    <rect x="540" y="110" width="230" height="44" rx="6" fill="#0f172a"/><rect x="540" y="110" width="230" height="44" rx="6" fill="rgba(136,19,55,0.35)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="556" y="130" fill="#e2e8f0" font-size="12">控制台（人）</text><text x="556" y="146" fill="#94a3b8" font-size="9">hub_token / 员工凭据账本 employee_keys</text>
+
+    <rect x="790" y="110" width="230" height="44" rx="6" fill="#0f172a"/><rect x="790" y="110" width="230" height="44" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="806" y="130" fill="#e2e8f0" font-size="12">运维 / 集成开发</text><text x="806" y="146" fill="#94a3b8" font-size="9">hub_cli.py（发钥匙/建身份/备份）· MCP</text>
+  </g>
+
+  <!-- ─── row B: entry surfaces ─── -->
+  <text x="40" y="188" fill="#64748b" font-size="10">入口面</text>
+  <g>
+    <rect x="40" y="176" width="230" height="56" rx="6" fill="#0f172a"/><rect x="40" y="176" width="230" height="56" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="56" y="198" fill="#e2e8f0" font-size="12">REST API</text><text x="56" y="214" fill="#94a3b8" font-size="9">155 个端点 / 27 个 routes_*.py 模块</text>
+
+    <rect x="290" y="176" width="230" height="56" rx="6" fill="#0f172a"/><rect x="290" y="176" width="230" height="56" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="306" y="198" fill="#e2e8f0" font-size="12">WebSocket 实时通道</text><text x="306" y="214" fill="#94a3b8" font-size="9">/ws/{agent_id} · 首帧 auth · 派单/心跳/请求</text>
+
+    <!-- 顺序与上一行接入者一一对应：③控制台（人）→ 控制台前端　④运维/集成开发 → 自描述入口 -->
+    <rect x="540" y="176" width="230" height="56" rx="6" fill="#0f172a"/><rect x="540" y="176" width="230" height="56" rx="6" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.5"/>
+    <text x="556" y="198" fill="#e2e8f0" font-size="12">控制台前端</text><text x="556" y="214" fill="#94a3b8" font-size="9">hub_ui（12 页）→ dashboard_dist 产物</text>
+
+    <rect x="790" y="176" width="230" height="56" rx="6" fill="#0f172a"/><rect x="790" y="176" width="230" height="56" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="806" y="198" fill="#e2e8f0" font-size="12">自描述入口</text><text x="806" y="214" fill="#94a3b8" font-size="9">/docs · /openapi.json（认证豁免，可自读）</text>
+  </g>
+
+  <!-- ─── row C: assembly layer ─── -->
+  <text x="40" y="282" fill="#64748b" font-size="10">装配层</text>
+  <rect x="40" y="270" width="980" height="70" rx="6" fill="#0f172a"/>
+  <rect x="40" y="270" width="980" height="70" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="58" y="296" fill="#e2e8f0" font-size="13" font-weight="600">routes.py —— 只做装配，不写业务</text>
+  <text x="58" y="316" fill="#94a3b8" font-size="10">统一认证中间件（hub_token｜agents.api_key｜员工凭据｜scoped key）· 豁免名单（/health·6 页面壳·register/bootstrap）· 每 IP 限流 · WS 首帧鉴权</text>
+  <text x="58" y="332" fill="#94a3b8" font-size="10">认证态集中在 routes_common（get_current_agent / get_current_principal / require_role / NO_AUTH）；子模块禁 import routes</text>
+
+  <!-- ─── row D: domain layer ─── -->
+  <text x="40" y="372" fill="#64748b" font-size="10">领域层</text>
+  <rect x="40" y="360" width="980" height="120" rx="6" fill="#0f172a"/>
+  <rect x="40" y="360" width="980" height="120" rx="6" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.5"/>
+  <text x="58" y="386" fill="#e2e8f0" font-size="13" font-weight="600">hub_core.SyncHub（单例，串起启动钩子）＋ hub_mixins/* 分域薄层</text>
+  <g fill="#cbd5e1" font-size="10">
+    <rect x="58" y="400" width="140" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="70" y="419">memory 记忆池</text>
+    <rect x="208" y="400" width="140" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="220" y="419">knowledge 知识</text>
+    <rect x="358" y="400" width="140" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="370" y="419">tasks 任务机</text>
+    <rect x="508" y="400" width="160" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="520" y="419">disclosure 披露引擎</text>
+    <rect x="682" y="400" width="150" height="30" rx="5" fill="rgba(251,146,60,0.3)" stroke="#fb923c" stroke-width="1"/>
+    <text x="694" y="419">outbox 事件底座</text>
+    <rect x="846" y="400" width="158" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="858" y="419">notifications 通知</text>
+    <rect x="58" y="438" width="140" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="70" y="457">ingest 入库</text>
+    <rect x="208" y="438" width="140" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="220" y="457">maintenance 维护</text>
+    <rect x="358" y="438" width="140" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="370" y="457">team 联邦</text>
+    <rect x="508" y="438" width="160" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="520" y="457">dashboard 统计</text>
+    <rect x="682" y="438" width="150" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="694" y="457">buffer 写缓冲</text>
+    <rect x="846" y="438" width="158" height="30" rx="5" fill="rgba(6,78,59,0.35)" stroke="#34d399" stroke-width="1"/>
+    <text x="858" y="457">shadow 影子镜像</text>
+  </g>
+
+  <!-- ─── row E: data layer ─── -->
+  <text x="40" y="512" fill="#64748b" font-size="10">数据层（一份真相源 + 三个派生侧 + 一条独立审计链）</text>
+  <g>
+    <rect x="40" y="500" width="270" height="104" rx="6" fill="#0f172a"/><rect x="40" y="500" width="270" height="104" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="56" y="524" fill="#e2e8f0" font-size="12" font-weight="600">SQLite（真相源）</text>
+    <text x="56" y="540" fill="#94a3b8" font-size="9">memory_pool · memory_versions · tasks</text>
+    <text x="56" y="553" fill="#94a3b8" font-size="9">knowledge_base · agents · employee_keys</text>
+    <text x="56" y="566" fill="#94a3b8" font-size="9">departments · shared_docs · events</text>
+    <text x="56" y="582" fill="#c4b5fd" font-size="9">写入进事务即真相；热点经 db_facade</text>
+
+    <rect x="330" y="500" width="215" height="104" rx="6" fill="#0f172a"/><rect x="330" y="500" width="215" height="104" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="346" y="524" fill="#e2e8f0" font-size="12" font-weight="600">ChromaDB（派生）</text>
+    <text x="346" y="540" fill="#94a3b8" font-size="9">统一 collection（layer 区分）</text>
+    <text x="346" y="553" fill="#94a3b8" font-size="9">memory / knowledge 同库不同层</text>
+    <text x="346" y="569" fill="#c4b5fd" font-size="9">metadata 只留最小披露键集</text>
+    <text x="346" y="585" fill="#94a3b8" font-size="9">可 rebuild + 反向对账</text>
+
+    <rect x="565" y="500" width="215" height="104" rx="6" fill="#0f172a"/><rect x="565" y="500" width="215" height="104" rx="6" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.5"/>
+    <text x="581" y="524" fill="#e2e8f0" font-size="12" font-weight="600">文件镜像（派生）</text>
+    <text x="581" y="540" fill="#94a3b8" font-size="9">wiki/ 知识页 · ystore 房间状态</text>
+    <text x="581" y="553" fill="#94a3b8" font-size="9">shared_docs 走 pycrdt 协作</text>
+    <text x="581" y="569" fill="#c4b5fd" font-size="9">同步走 wiki_sync（含孤儿清理）</text>
+    <text x="581" y="585" fill="#94a3b8" font-size="9">手删页 = 下轮 sync 会重建回来</text>
+
+    <rect x="800" y="500" width="205" height="104" rx="6" fill="#0f172a"/><rect x="800" y="500" width="205" height="104" rx="6" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+    <text x="816" y="524" fill="#e2e8f0" font-size="12" font-weight="600">audit/ 哈希链（独立）</text>
+    <text x="816" y="540" fill="#94a3b8" font-size="9">prev/entry hash 逐条串链</text>
+    <text x="816" y="553" fill="#94a3b8" font-size="9">主链 · 披露链 · memory 窗口</text>
+    <text x="816" y="569" fill="#fda4af" font-size="9">本地锚只防误删，不自证防篡改</text>
+    <text x="816" y="585" fill="#94a3b8" font-size="9">外部锚 = RFC3161 TSA（默认关）</text>
+  </g>
+
+  <!-- ─── row F: consistency channel ─── -->
+  <text x="40" y="652" fill="#64748b" font-size="10">一致性通道（无分布式事务，靠事件 + 可对账）</text>
+  <rect x="40" y="640" width="500" height="58" rx="6" fill="#0f172a"/>
+  <rect x="40" y="640" width="500" height="58" rx="6" fill="rgba(251,146,60,0.3)" stroke="#fb923c" stroke-width="1.5"/>
+  <text x="56" y="663" fill="#e2e8f0" font-size="12">event_outbox → OutboxConsumer</text>
+  <text x="56" y="681" fill="#94a3b8" font-size="9">主库写入与事件同事务入队 → 单线程消费者推进派生侧 → 失败留 attempts / 重启 replay</text>
+
+  <rect x="560" y="640" width="445" height="58" rx="6" fill="#0f172a"/>
+  <rect x="560" y="640" width="445" height="58" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+  <text x="576" y="663" fill="#e2e8f0" font-size="12">网关读出口：POST /api/v1/gateway/read</text>
+  <text x="576" y="681" fill="#94a3b8" font-size="9">按主体 + 披露级别剥离后返回，并落读审计 —— 接入方推荐入口</text>
+
+  <!-- ─── right panel: invariants ─── -->
+  <rect x="1085" y="270" width="325" height="370" rx="6" fill="#0f172a"/>
+  <rect x="1085" y="270" width="325" height="370" rx="6" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.5"/>
+  <text x="1103" y="296" fill="#e2e8f0" font-size="13" font-weight="600">横切不变式（不随端点走）</text>
+
+  <text x="1103" y="324" fill="#fb7185" font-size="10" font-weight="600">① 写入隔离</text>
+  <text x="1103" y="340" fill="#94a3b8" font-size="9">记忆归 owner，写自己的池子不广播</text>
+
+  <text x="1103" y="366" fill="#fb7185" font-size="10" font-weight="600">② 披露只降不升，多处判定取 min</text>
+  <text x="1103" y="382" fill="#94a3b8" font-size="9">NONE → METADATA → SUMMARY → FULL</text>
+  <text x="1103" y="396" fill="#94a3b8" font-size="9">规则链各判一档，取最保守那档</text>
+
+  <text x="1103" y="422" fill="#fb7185" font-size="10" font-weight="600">③ 先鉴权、后取内容</text>
+  <text x="1103" y="438" fill="#94a3b8" font-size="9">存在性与无权同状态码 + 同 detail</text>
+  <text x="1103" y="452" fill="#94a3b8" font-size="9">（对非特权主体，防枚举预言机）</text>
+
+  <text x="1103" y="478" fill="#fb7185" font-size="10" font-weight="600">④ 端点硬边界</text>
+  <text x="1103" y="494" fill="#94a3b8" font-size="9">凭据/配置类端点对受限钥匙直接拒</text>
+  <text x="1103" y="508" fill="#94a3b8" font-size="9">（否则只读钥匙能自我提权）</text>
+
+  <text x="1103" y="534" fill="#fb7185" font-size="10" font-weight="600">⑤ 无主体 → fail-closed</text>
+  <text x="1103" y="550" fill="#94a3b8" font-size="9">MCP 工具无身份 → 只给已发布摘要级</text>
+
+  <text x="1103" y="576" fill="#fb7185" font-size="10" font-weight="600">⑥ 幂等归接入方</text>
+  <text x="1103" y="592" fill="#94a3b8" font-size="9">hello 重放未确认派单，不去重</text>
+
+  <text x="1103" y="618" fill="#94a3b8" font-size="9">⑦ 审计只记事实，不做域内自证</text>
+
+  <!-- ─── row G: optional / demoted surfaces ─── -->
+  <text x="40" y="736" fill="#64748b" font-size="10">可选 / 已降级面（在仓里，但不是主线形态）</text>
+  <g>
+    <rect x="40" y="724" width="320" height="62" rx="6" fill="#0f172a"/><rect x="40" y="724" width="320" height="62" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="56" y="747" fill="#e2e8f0" font-size="11">Hub ↔ Hub 联邦</text>
+    <text x="56" y="763" fill="#94a3b8" font-size="9">6 位配对码握手 · AES-GCM 信道 · 跨 Hub 披露</text>
+    <text x="56" y="777" fill="#64748b" font-size="9">主线是企业内单 Hub，联邦为扩展形态</text>
+
+    <rect x="376" y="724" width="320" height="62" rx="6" fill="#0f172a"/><rect x="376" y="724" width="320" height="62" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="392" y="747" fill="#e2e8f0" font-size="11">data-trunk git 影子</text>
+    <text x="392" y="763" fill="#94a3b8" font-size="9">影子双写在跑，定位已降级</text>
+    <text x="392" y="777" fill="#64748b" font-size="9">= 审计与备份镜像，不再是数据通道</text>
+
+    <rect x="712" y="724" width="320" height="62" rx="6" fill="#0f172a"/><rect x="712" y="724" width="320" height="62" rx="6" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.5"/>
+    <text x="728" y="747" fill="#e2e8f0" font-size="11">MCP 入口</text>
+    <text x="728" y="763" fill="#94a3b8" font-size="9">工具是模块级函数，拿不到 requester</text>
+    <text x="728" y="777" fill="#64748b" font-size="9">故 fail-closed；主体注入待做（CD-058）</text>
+  </g>
+
+  <!-- ─── row H: main line & gaps ─── -->
+  <text x="40" y="822" fill="#64748b" font-size="10">已定主线 / 尚未走完（架构定了，部署面还差）</text>
+  <g>
+    <rect x="40" y="810" width="320" height="66" rx="6" fill="#0f172a"/><rect x="40" y="810" width="320" height="66" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="56" y="833" fill="#e2e8f0" font-size="11">主线已裁决</text>
+    <text x="56" y="850" fill="#94a3b8" font-size="9">数据底座：SQLite → PG → 分片</text>
+    <text x="56" y="864" fill="#94a3b8" font-size="9">知识检索：统一 collection + layer 过滤</text>
+
+    <rect x="376" y="810" width="320" height="66" rx="6" fill="#0f172a"/><rect x="376" y="810" width="320" height="66" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="392" y="833" fill="#e2e8f0" font-size="11">部署面未完成</text>
+    <text x="392" y="850" fill="#94a3b8" font-size="9">无服务化/开机自启（CD-082）</text>
+    <text x="392" y="864" fill="#94a3b8" font-size="9">备份裸拷 WAL 且不出本机（CD-077/078）</text>
+
+    <rect x="712" y="810" width="320" height="66" rx="6" fill="#0f172a"/><rect x="712" y="810" width="320" height="66" rx="6" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="728" y="833" fill="#e2e8f0" font-size="11">已知缺口（本轮取证）</text>
+    <text x="728" y="850" fill="#94a3b8" font-size="9">WS memory_search 死路径（CD-091）</text>
+    <text x="728" y="864" fill="#94a3b8" font-size="9">镜像 10.1 GB · 多实例非全局（CD-090/089）</text>
+  </g>
+
+  <!-- ─── legend ─── -->
+  <rect x="40" y="896" width="1370" height="86" rx="6" fill="#0f172a"/>
+  <rect x="40" y="896" width="1370" height="86" rx="6" fill="rgba(15,23,42,0.85)" stroke="#334155" stroke-width="1"/>
+  <text x="58" y="920" fill="#e2e8f0" font-size="11" font-weight="600">图例</text>
+  <g font-size="10">
+    <rect x="58" y="932" width="16" height="12" rx="3" fill="rgba(8,51,68,0.4)" stroke="#22d3ee" stroke-width="1.4"/><text x="82" y="942" fill="#94a3b8">入口 / 前端</text>
+    <rect x="196" y="932" width="16" height="12" rx="3" fill="rgba(6,78,59,0.4)" stroke="#34d399" stroke-width="1.4"/><text x="220" y="942" fill="#94a3b8">服务 / 领域逻辑</text>
+    <rect x="360" y="932" width="16" height="12" rx="3" fill="rgba(76,29,149,0.4)" stroke="#a78bfa" stroke-width="1.4"/><text x="384" y="942" fill="#94a3b8">存储（真相源 / 派生）</text>
+    <rect x="560" y="932" width="16" height="12" rx="3" fill="rgba(136,19,55,0.4)" stroke="#fb7185" stroke-width="1.4"/><text x="584" y="942" fill="#94a3b8">安全边界 / 审计链</text>
+    <rect x="742" y="932" width="16" height="12" rx="3" fill="rgba(251,146,60,0.3)" stroke="#fb923c" stroke-width="1.4"/><text x="766" y="942" fill="#94a3b8">事件 / 一致性通道</text>
+    <rect x="926" y="932" width="16" height="12" rx="3" fill="rgba(120,53,15,0.3)" stroke="#fbbf24" stroke-width="1.4"/><text x="950" y="942" fill="#94a3b8">主线方向 / 未完成项</text>
+    <rect x="1128" y="932" width="16" height="12" rx="3" fill="rgba(30,41,59,0.5)" stroke="#94a3b8" stroke-width="1.4"/><text x="1152" y="942" fill="#94a3b8">可选 / 已降级面</text>
+
+    <line x1="58" y1="964" x2="86" y2="964" stroke="#64748b" stroke-width="1.4" marker-end="url(#arr)"/><text x="96" y="968" fill="#94a3b8">调用 / 数据流</text>
+    <line x1="252" y1="964" x2="280" y2="964" stroke="#34d399" stroke-width="1.3" stroke-dasharray="5,3" marker-end="url(#arr)"/><text x="290" y="968" fill="#94a3b8">事件驱动的派生侧更新</text>
+    <line x1="480" y1="964" x2="508" y2="964" stroke="#fb7185" stroke-width="1.3" stroke-dasharray="4,4" marker-end="url(#arrRose)"/><text x="518" y="968" fill="#94a3b8">鉴权 / 披露剥离</text>
+    <text x="700" y="968" fill="#64748b" font-size="9">注：每层只做一件事 —— 装配层不写业务、领域层不碰 HTTP、存储层不做权限判断；跨层问题一律回到不变式里解决。</text>
+  </g>
+
+  <text x="40" y="1010" fill="#64748b" font-size="10">参考：docs/architecture-decision-data-backbone.md（数据底座主线）· docs/architecture-decision-kb-retrieval.md（统一 collection）· docs/integration-contract.md（对外契约）· docs/api-error-policy.md（存在性不泄露）· known_limitations.py（能力边界）</text>
+  <text x="40" y="1030" fill="#475569" font-size="9">生成：2026-09-22（升龙轮后续）· 依据当前 HEAD 的分层与实测事实绘制；五类入口 / 155 端点 / 12 页控制台 / 四类交付形态均为实测数字。</text>
+  <text x="40" y="1050" fill="#475569" font-size="9">本图力求「架构定稿 + 单机可用 + 运维面未走完」三态如实并列：黄色卡片是没做完的，不要当成已完成读。</text>
+</svg>

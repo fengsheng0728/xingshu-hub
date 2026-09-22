@@ -1,23 +1,46 @@
-version: '3.8'
-
 # Hermes Sync Hub - 写入隔离 + 渐进式披露
 # 适用 99 人以内小公司，Docker 单机部署
+#
+# ── CD-076（2026-09-22）部署面收口 ──────────────────────────────
+# ① 运行期数据全部收进 hub-data 卷（/app/data 下，经 SYNC_HUB_* env 注入）。
+#    修复前：DB 落 /app/sync_hub.db，chroma_db/wiki/audit/ystore.db/config 落 /app/*，
+#    既不在任何卷里、又多被 .dockerignore 排除在镜像外 → `docker compose down`、
+#    换镜像、重建容器 = Agent 名单 + 记忆 + 知识 + 审计一次全没。
+#    口径：env 覆盖通道见 models.py 的 SYNC_HUB_* 覆盖段（优先级高于 config.yaml）。
+# ② 去掉 main.py / dashboard 两个宿主源码 bind mount：交付态镜像自洽，
+#    避免「镜像里打了 2.1.0、跑的却是宿主旧代码」的版本漂移。
+# ③ 首次部署：config.yaml 需放进卷内 config/ 子目录（不放则用内置默认值启动，
+#    受管注册/控制台凭据请按 README「部署」段放置）。
+#    放置命令（宿主机执行一次）：
+#      docker compose run --rm --entrypoint sh sync-hub \
+#        -c 'mkdir -p /app/data/config && cp /app/config.example.yaml /app/data/config/config.yaml'
+#     ✅ 已实跑（2026-09-22，本机 Docker engine 可用后）：镜像内 config.example.yaml 在 /app/
+#       （`COPY . .` 带入），该命令在容器内把模板成功落到卷内 /app/data/config/config.yaml。
+# ───────────────────────────────────────────────────────────────
 
 services:
   sync-hub:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: hermes-sync-hub
+    container_name: ${HUB_CONTAINER_NAME:-hermes-sync-hub}
     ports:
-      - "3060:3060"
+      # HUB_PORT 可覆盖：同机跑「持久化演练」时不占用生产 3060（scripts/deploy_persistence_drill.sh 用 3077）
+      - "${HUB_PORT:-3060}:3060"
+    environment:
+      # 六类运行期数据全部指到卷内 —— 换镜像/重建容器后数据仍在
+      SYNC_HUB_DB: /app/data/sync_hub.db
+      SYNC_HUB_CHROMA_PATH: /app/data/chroma_db
+      SYNC_HUB_AUDIT_DIR: /app/data/audit
+      SYNC_HUB_WIKI_ROOT: /app/data/wiki
+      SYNC_HUB_YSTORE_PATH: /app/data/ystore.db
+      SYNC_HUB_CONFIG_DIR: /app/data/config
     volumes:
+      # 唯一挂载点：全部运行期数据都在这个卷里（含 config/）
       - hub-data:/app/data
-      - ./main.py:/app/main.py
-      - ./dashboard:/app/dashboard
     restart: unless-stopped
     healthcheck:
-      # 基础镜像 python:3.11-slim 无 curl，改用 python urllib 探活
+      # 基础镜像无 curl，改用 python urllib 探活
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3060/health', timeout=3)"]
       interval: 30s
       timeout: 5s

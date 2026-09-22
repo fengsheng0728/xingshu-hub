@@ -11,7 +11,7 @@ from routes_automation import register as _register_automation, automation_sched
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 import uuid
-from models import CONFIG
+from models import CONFIG, HUB_VERSION
 from hub_core import hub
 from logfmt import set_trace_id
 
@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Hermes Sync Hub - Progressive Disclosure",
     description="写入隔离 + 渐进式披露架构 · 适用 99 人以内小公司",
-    version="2.0.0",
+    version=HUB_VERSION,
     lifespan=lifespan,
 )
 # _register_automation called at bottom
