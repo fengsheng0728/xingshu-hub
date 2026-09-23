@@ -16,7 +16,7 @@ import routes_common
 from routes_common import _version_ge, principal_is_privileged
 # _ws 为 routes_shared 里的动态 getter（返回 shared_workspace.workspace 当前值），
 # 生命周期里重新绑定的是 shared_workspace.workspace——import 此函数语义与搬前一致
-from routes_shared import _ws, _shared_watchers, _broadcast_shared_update
+from routes_shared import _ws, _shared_watchers, _broadcast_shared_update, _doc_archived
 
 router = APIRouter()
 
@@ -317,6 +317,20 @@ async def ws_shared_watch(websocket: WebSocket, doc_id: str):
         return
     if not agent_id:
         agent_id = "__anon__"
+    # 2026-09-22：已归档的房不接纳新 watcher —— 归档后 REST 读写已 404，
+    # 通道也要一起关（先送一帧 shared_archived 再按 4404 关闭）。
+    if _doc_archived(doc_id):
+        import json as _json
+        try:
+            await websocket.send_text(_json.dumps({
+                "type": "shared_archived", "doc_id": doc_id, "reason": "doc archived"}))
+        except Exception:
+            pass
+        try:
+            await websocket.close(code=4404, reason="doc archived")
+        except Exception:
+            pass
+        return
     watchers = _shared_watchers.setdefault(doc_id, {})
     watchers[agent_id] = (websocket, time.time())
     try:

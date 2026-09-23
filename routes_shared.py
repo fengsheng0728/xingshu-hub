@@ -52,6 +52,36 @@ async def _broadcast_shared_update(doc_id: str, event: dict):
     _shared_watchers[doc_id] = watchers
 
 
+def _doc_archived(doc_id: str) -> bool:
+    """只看「已归档」这一态。不存在的 doc 返回 False —— 保持既有「不存在」语义不变
+    （见 tests/test_ws_auth_matrix.py 对 /ws/shared/* 的成功用例）。"""
+    import sqlite3 as _sq
+    try:
+        _c = _sq.connect(CONFIG.DB_PATH)
+        _row = _c.execute("SELECT archived FROM shared_docs WHERE doc_id=?", (doc_id,)).fetchone()
+        _c.close()
+    except Exception:
+        return False
+    return bool(_row and _row[0])
+
+
+async def _close_shared_watchers(doc_id: str, reason: str = "doc archived") -> int:
+    """关闭该文档的全部轻量 watcher（归档 = 讨论结束，通道要一起关），返回关闭数。"""
+    import json as _json
+    watchers = _shared_watchers.pop(doc_id, {}) or {}
+    msg = _json.dumps({"type": "shared_archived", "doc_id": doc_id, "reason": reason})
+    for _aid, (ws, _j) in list(watchers.items()):
+        try:
+            await ws.send_text(msg)
+        except Exception:
+            pass
+        try:
+            await ws.close(code=4404, reason=reason)
+        except Exception:
+            pass
+    return len(watchers)
+
+
 @router.get("/api/v1/shared/docs")
 async def api_shared_list(current_agent: str = Depends(get_current_agent),
                           principal=Depends(get_current_principal)):
@@ -160,10 +190,47 @@ async def api_shared_delete(doc_id: str, current_agent: str = Depends(get_curren
     if vis == "private" and _row[0] != current_agent:
         _log_deny(current_agent, None, "shared", "", doc_id)
         raise HTTPException(403, "仅创建者可归档私有文档")
+    # 2026-09-22：归档 = 讨论结束 —— 先把房里的轻量 watcher 一起关掉再归档
+    # （pycrdt 侧的连接由 delete_doc → close_doc_connections 关）
+    await _close_shared_watchers(doc_id)
     ok = await ws_inst.delete_doc(doc_id)
     if not ok:
         _log_deny(current_agent, None, "shared", "", doc_id)
         raise HTTPException(404, "doc not found")
     return {"status": "deleted"}
+
+
+@router.post("/api/v1/shared/docs/{doc_id}/unarchive")
+async def api_shared_unarchive(doc_id: str, current_agent: str = Depends(get_current_agent)):
+    """取消归档（2026-09-22）：archived 1 → 0，恢复后列表可见、可读、可再进房。
+
+    权限与归档对称 —— 经同一 n1 审批门；private 文档仅创建者可恢复。
+    房间按需懒加载，恢复时不预建 room。
+    """
+    from routes_n1 import _n1_gate
+    _gate = await _n1_gate(current_agent, "shared_docs", {"doc_id": doc_id})
+    if _gate:
+        return _gate
+    ws_inst = _ws()
+    if ws_inst is None:
+        raise HTTPException(503, "workspace not ready")
+    import sqlite3 as _sq
+    _c = _sq.connect(CONFIG.DB_PATH)
+    _row = _c.execute(
+        "SELECT created_by, visibility, archived FROM shared_docs WHERE doc_id=?", (doc_id,)
+    ).fetchone()
+    _c.close()
+    if _row is None:
+        _log_deny(current_agent, None, "shared", "", doc_id)
+        raise HTTPException(404, "doc not found")
+    vis = _row[1] or "team"
+    if vis == "private" and _row[0] != current_agent:
+        _log_deny(current_agent, None, "shared", "", doc_id)
+        raise HTTPException(403, "仅创建者可恢复私有文档")
+    ok = await ws_inst.restore_doc(doc_id)
+    if not ok:
+        _log_deny(current_agent, None, "shared", "", doc_id)
+        raise HTTPException(409, "doc 未处于归档状态")
+    return {"status": "restored", "doc_id": doc_id}
 
 

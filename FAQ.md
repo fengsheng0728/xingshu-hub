@@ -73,13 +73,18 @@
 |------|------|------|
 | 一键启动 | ★☆☆ | `python main.py` 直接跑 |
 | Docker 部署 | ★★☆ | `docker-compose up -d` |
-| 服务注册 | ★★★ | 写入 systemd/Windows 服务自动启动 |
+| 开机自启 / 自愈 | ★★★ | Windows：`powershell -ExecutionPolicy Bypass -File scripts\install_service_windows.ps1 -Mode exe`（注册「开机自启 + 失败重启」计划任务，**需管理员执行一次**，卸载加 `-Uninstall`）；Linux 未提供脚本，请用 Docker 或自行配 systemd |
 
 99 人以内的小公司场景：
 - **5-10 个 Agent**：单机 `python main.py` 完全够用
 - **20-50 个 Agent**：建议用 Docker 部署（资源隔离）
 
-**不需要专职 IT。** 能把电脑开机、能打开命令行就能跑。
+**基本不需要专职 IT。** 能把电脑开机、能打开命令行就能跑；日常也不用盯——备份、清理、检索降级都是自动的（未装向量栈会自动降级为关键词检索）。
+
+两条如实说明（CD-082 / CD-076，2026-09-23 更新，别对客户说成「零运维」）：
+
+- **Windows 开机自启脚本已提供**（`scripts\install_service_windows.ps1`）：注册「开机自启 + 失败重启」计划任务，**需管理员执行一次**；本机实测「无管理员权限时明确失败并打印修复命令、不假装成功」，**管理员环境下的注册实证待补**（脚本会回读任务确认，不成功即非零退出）。
+- **Linux systemd 未提供脚本**；**Docker 部署路径的构建与「重建容器后数据仍在」判据本机已实测，GitHub runner 上的首次运行待补**——对外承诺这两条之前先确认。
 
 ---
 

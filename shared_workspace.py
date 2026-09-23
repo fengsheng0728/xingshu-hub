@@ -63,6 +63,10 @@ class SharedWorkspace:
         # 3-7(2026-09-10): 容量护栏 — 房间空闲卸载 TTL + 水位告警
         self._last_active: dict[str, float] = {}   # doc_id → time.monotonic() 最后活动时间
         self._active_conns: dict[str, int] = {}    # doc_id → 活跃 WS 连接数
+        # 2026-09-22（归档收口）：doc_id → 该房活跃 WS 连接对象集合。
+        # 归档是「讨论结束」语义——连接必须一起关，故需要可主动 close 的引用
+        # （此前只有计数 _active_conns，归档无从踢连接）。
+        self._doc_conns: dict[str, set] = {}
         self._stopping: bool = False               # stop() 置位，清扫循环据此退出
         self._cap_warned: bool = False             # 水位告警只打一次（回落到阈值以下复位）
         self._task_group = None
@@ -130,9 +134,29 @@ class SharedWorkspace:
         self._task_group.start_soon(_run_room)
         await room.started.wait()
 
-        # 确保有 content Text
+        # 2026-09-22（正文持久化收口）：把 ystore 里的历史 apply 回 ydoc。
+        # pycrdt 的 YRoom 只写不读 —— `_broadcast_updates` 里仅有 ystore.write，
+        # 全包（pycrdt / pycrdt.websocket）无一处调用 `apply_updates`。不补这一步，
+        # ydoc 在每次进程启动/room 重载时都是空的：shared_docs 元数据（标题/块数）
+        # 在、正文丢。取证：`_sync/archive_probe/restart_probe.py`
+        # （写后 len=111 → 同库重启后 len=0，而 ystore.db 里正文标记仍在）。
+        #
+        # 顺序很关键：**先在本地注册 content Text，再 apply**。pycrdt 的顶层取值
+        # 依赖本地类型注册 —— 先 apply 后建 Text 会得到 `"content" in ydoc == True`
+        # 但 `ydoc["content"] is None`（实测），正文照样读不出来。
         if "content" not in ydoc:
             ydoc["content"] = Text()
+
+        for _ in range(100):                       # 等 room 内部的 ystore 起来（最多 ~2s）
+            _di = getattr(ystore, "db_initialized", None)
+            if _di is not None and _di.is_set():
+                break
+            await asyncio.sleep(0.02)
+        try:
+            await ystore.apply_updates(ydoc)       # 历史按 item id 合并进本地 Text
+            LOG.debug("Applied ystore history for room %s", doc_id)
+        except Exception as _e:
+            LOG.debug("No ystore history for room %s (%s)", doc_id, _e)
 
         self._rooms[doc_id] = room
         self._docs[doc_id] = ydoc
@@ -151,6 +175,9 @@ class SharedWorkspace:
         LOG.debug("Room loaded: %s", doc_id)
 
     async def _unload_room(self, doc_id: str):
+        # 2026-09-22：卸载前把当前状态落一次 ystore —— room 一走，内存里未落盘的
+        # CRDT 变更就永久丢了（覆盖建档初始内容等不经 append_block 的写入路径）。
+        await self._flush_ystore(doc_id)
         room = self._rooms.pop(doc_id, None)
         self._docs.pop(doc_id, None)
         self._last_active.pop(doc_id, None)   # 3-7: 同步清护栏状态，防这两个 dict 无上限增长
@@ -307,7 +334,25 @@ class SharedWorkspace:
         conn.commit()
         conn.close()
         self._last_active[doc_id] = time.monotonic()  # 3-7: 写入即活动
+        # 2026-09-22：主动把当前状态落一次 ystore。
+        # 默认落盘路径是 CRDT observe → room 的 `_broadcast_updates` → `start_soon(ystore.write)`，
+        # 属**异步任务**：写完立刻归档（room 被卸载）或进程被杀时，这一段可能还没落盘
+        # → 正文丢（实测：TestClient 下「写→归档→恢复」读到空内容）。
+        # 这里同步 flush 一次全量 state（Yjs update 可重复应用，幂等）。
+        await self._flush_ystore(doc_id)
         return True
+
+    async def _flush_ystore(self, doc_id: str) -> None:
+        """把内存 ydoc 的当前状态同步写入 ystore（写失败不阻塞业务，D4 降级）。"""
+        room = self._rooms.get(doc_id)
+        ystore = getattr(room, "ystore", None) if room is not None else None
+        ydoc = self._docs.get(doc_id)
+        if ystore is None or ydoc is None:
+            return
+        try:
+            await ystore.encode_state_as_update(ydoc)
+        except Exception as _e:
+            LOG.warning("flush ystore failed for %s: %s", doc_id, _e)
 
     async def can_access(self, doc_id: str, agent_id: str) -> bool:
         """可见性校验：team 全员 / private 仅创建者 + 白名单。不存在返回 False。"""
@@ -333,25 +378,104 @@ class SharedWorkspace:
             allowed = []
         return agent_id in allowed
 
-    async def delete_doc(self, doc_id: str) -> bool:
-        async with self._lock:
-            if doc_id not in self._docs:
-                return False
-
-            import sqlite3
+    async def is_archived(self, doc_id: str) -> bool:
+        """文档是否处于归档状态。不存在 → False（不存在的 doc 由各调用方按自身语义处理，
+        以免改动既有的「不存在」语义，见 tests/test_ws_auth_matrix.py）。"""
+        import sqlite3
+        try:
             conn = sqlite3.connect(self.db_path)
-            conn.execute(
-                "UPDATE shared_docs SET archived = 1 WHERE doc_id = ?", (doc_id,)
-            )
-            conn.commit()
+            row = conn.execute(
+                "SELECT archived FROM shared_docs WHERE doc_id = ?", (doc_id,)
+            ).fetchone()
             conn.close()
+        except Exception:
+            return False
+        return bool(row and row[0])
 
+    async def restore_doc(self, doc_id: str) -> bool:
+        """取消归档（archived 1 → 0）。仅对处于归档态的文档生效；否则返回 False。
+        恢复后按需懒加载 room，无需主动载入。"""
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.execute(
+            "UPDATE shared_docs SET archived = 0 WHERE doc_id = ? AND archived = 1", (doc_id,)
+        )
+        conn.commit()
+        conn.close()
+        if cur.rowcount <= 0:
+            return False
+        LOG.info("Restored shared doc: %s", doc_id)
+        # 恢复即可读 —— get_doc_content / append_block 都依赖内存 room
+        # （归档时 _unload_room 已把它卸掉），故这里补一次懒加载。
+        try:
+            if doc_id not in self._rooms:
+                await self._load_room(doc_id)
+        except Exception as _e:
+            LOG.warning("restore: load room failed for %s: %s", doc_id, _e)
+        return True
+
+    async def close_doc_connections(self, doc_id: str, reason: str = "doc archived") -> int:
+        """关闭该文档的全部实时连接（归档用）：先送一帧 shared_archived 再按 4404 关闭。
+        返回被关闭的连接数。连接异常一律吞掉——归档必须完成，不能被单个坏连接拖住。"""
+        import json as _json
+        conns = list(self._doc_conns.pop(doc_id, set()) or ())
+        msg = _json.dumps({"type": "shared_archived", "doc_id": doc_id, "reason": reason})
+        for ws in conns:
+            try:
+                await ws.send_text(msg)
+            except Exception:
+                pass
+            try:
+                await ws.close(code=4404, reason=reason)
+            except Exception:
+                pass
+        return len(conns)
+
+    async def delete_doc(self, doc_id: str) -> bool:
+        """归档文档：库内置 archived=1 + 关闭该房全部实时连接 + 卸载内存 room。
+
+        2026-09-22 两处收口：
+        ① 归档 = 讨论结束 → 连接要一起关（此前归档后 WS 仍可进房，实测证据见
+           `_sync/archive_probe/`）；
+        ② 不再要求文档已在内存（原实现 `doc_id not in self._docs → False` 使
+           sweep 卸载过的冷文档「归档不了」，只能 404）。
+        """
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.execute(
+            "UPDATE shared_docs SET archived = 1 WHERE doc_id = ? AND archived = 0", (doc_id,)
+        )
+        conn.commit()
+        conn.close()
+        if cur.rowcount <= 0:
+            return False
+
+        await self.close_doc_connections(doc_id)
+        async with self._lock:
             await self._unload_room(doc_id)
-            LOG.info("Archived shared doc: %s", doc_id)
-            return True
+        LOG.info("Archived shared doc: %s", doc_id)
+        return True
 
     async def serve_websocket(self, doc_id: str, ws) -> None:
-        """为 WebSocket 客户端提供实时协同服务"""
+        """为 WebSocket 客户端提供实时协同服务。
+
+        2026-09-22：已归档文档不再接纳新连接——先回一帧 shared_archived 再按
+        4404 关闭。理由：归档后 REST 读写已 404（内容封锁），若通道仍可进房，
+        「归档」就只关了一半（实测见 `_sync/archive_probe/`）。
+        """
+        import json as _json
+        if await self.is_archived(doc_id):
+            try:
+                await ws.send_text(_json.dumps({
+                    "type": "shared_archived", "doc_id": doc_id, "reason": "doc archived"}))
+            except Exception:
+                pass
+            try:
+                await ws.close(code=4404, reason="doc archived")
+            except Exception:
+                pass
+            return
+
         if doc_id not in self._rooms:
             await self._load_room(doc_id)
         # 3-7: 连接进入即活动（含上面的兜底加载路径）
@@ -360,6 +484,7 @@ class SharedWorkspace:
         room = self._rooms[doc_id]
         channel = _FastAPIWSChannel(ws, f"/ws/shared/{doc_id}")
 
+        self._doc_conns.setdefault(doc_id, set()).add(ws)                  # 归档时按此踢连接
         self._active_conns[doc_id] = self._active_conns.get(doc_id, 0) + 1  # 3-7: 进入 +1
         try:
             try:
@@ -369,6 +494,11 @@ class SharedWorkspace:
         finally:
             # 3-7: finally 里 -1，异常路径也必须减
             self._active_conns[doc_id] = self._active_conns.get(doc_id, 1) - 1
+            _c = self._doc_conns.get(doc_id)
+            if _c is not None:
+                _c.discard(ws)
+                if not _c:
+                    self._doc_conns.pop(doc_id, None)
 
 
 class _FastAPIWSChannel:

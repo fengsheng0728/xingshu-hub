@@ -48,6 +48,14 @@ database:
   chroma_max_vectors: 50000       # 3-7: ChromaDB 集合向量数水位阈值（超过仅告警，不影响写入/检索）
   # slow_query_ms: 200            # D-10: db 门面慢查询阈值毫秒（缺省 200；0 = 每次调用都记 WARNING，仅测试用）
 
+# ---- 启动迁移（CD-082, 2026-09-23）----
+migrations:
+  # 启动时检查库内 alembic_version；库已登记迁移且落后于脚本 head 时自动执行
+  # `alembic upgrade head`（机房重启 / 换机部署后忘了跑迁移 = 运行期撞缺列）。
+  # false = 只告警不迁移（旧行为，需人工 upgrade）；迁移失败一律 fail-closed 拒绝启动。
+  # 库内没有 alembic_version 表（全新库）时不动它，由内联 DDL / 人工 stamp 决定。
+  auto_upgrade: true
+
 # ---- 共享工作区容量护栏（3-7, 2026-09-10）----
 workspace:
   room_idle_ttl_sec: 1800         # 房间空闲卸载 TTL 秒；0 = 关闭清扫循环（kill switch）

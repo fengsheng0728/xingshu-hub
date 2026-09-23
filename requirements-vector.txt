@@ -1,4 +1,4 @@
-# 星枢 Sync Hub — 可选向量栈依赖（非核心，合计约 2GB）
+# 星枢 Sync Hub — 可选向量栈依赖（非核心；CD-090 后 torch 走 CPU 轮，比 CUDA 轮少下载 ≈1.5GB）
 # 安装: pip install -r requirements-vector.txt（需先装核心: pip install -r requirements.txt）
 #
 # 用途：以下三项能力依赖本文件，未安装时 Hub 仍可启动并自动降级：
@@ -10,6 +10,17 @@
 #
 # 钉版风格与 requirements.txt 一致（~= 锁兼容范围，允许补丁级升级）；
 # 三件套的传递依赖（torch/transformers 等）由 pip 按钉版自动解析。
+
+# CD-090（2026-09-23 运维轮）—— 让 torch 装 CPU 轮，砍掉白付的 CUDA 字节。
+# 背景（实测）：torch 的默认 PyPI Linux 轮声明了 platform_system=="Linux" 的 CUDA 依赖
+#   nvidia-cudnn-cu13 527.5MB / nvidia-nccl-cu13 206.0MB / nvidia-nvshmem-cu13 57.6MB
+#   + nvidia-cusparselt-cu13 + triton；实测镜像 disk 10.1GB / content 3.14GB。
+# 而 Hub 的向量嵌入走 CPU 路径（sentence-transformers 在本部署里不做 CUDA 推理），
+# 这些字节纯属白付：交付包体积、首次 pull 时间、落盘、冷启动全被拖累。
+# 本行让 torch 解析到 CPU 轮（187.2MB，Requires-Dist 里零 nvidia/triton），
+# 不影响 chromadb / langchain / sentence-transformers 的其它解析结果。
+# 回退：删掉本行即回到 CUDA 轮（PyPI 默认）。
+--extra-index-url https://download.pytorch.org/whl/cpu
 
 # 向量数据库（语义检索）
 chromadb~=1.5.9

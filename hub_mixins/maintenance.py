@@ -23,10 +23,19 @@ class MaintenanceMixin:
     """Auto-generated mixin — do not edit manually unless you know why."""
 
     async def _run_backup(self):
-        """启动时备份数据库（基于 config.yaml 中的 backup 配置）
+        """启动/周期备份（CD-077，2026-09-23 运维轮）
+
+        基线的裸拷主库文件（把 DB 文件直接复制走）有两个洞：
+          ① WAL 模式下新提交还在 `-wal` 里，裸拷主库文件拿到的是旧快照；
+          ② 只拷 DB，`chroma_db/` 不在备份里 → 恢复时向量索引与记忆池对不上。
+        改为复用 `hub_cli.cmd_backup`（VACUUM INTO 一致性快照 + ChromaDB 目录 + marker/manifest）——
+        **同一份实现两处调用**，不再维护两份备份逻辑（手动 CLI 与自动备份口径一致）。
+
+        观测（同轮收口「失败静默」）：失败落 `events(backup_failed)` 可机器判读的痕迹 + logger.error。
+        通知渠道未验证（CD-018），故只作附加路径，落链才是判据。
+
         内置冷却：距上次备份 < 1 小时则跳过，防止快速重启产生大量备份。
         """
-        import shutil
         try:
             # 冷却检查：1 小时内不重复备份
             now_ts = datetime.now(timezone.utc).timestamp()
@@ -42,26 +51,63 @@ class MaintenanceMixin:
             if not backup_cfg.get("backup_enabled", True):
                 return
 
-            keep_days = backup_cfg.get("backup_interval_days", 7)
+            # 保留天数：新字段 backup_keep_days 优先，回退既有 backup_interval_days（历史字段名
+            # 语义就是保留天数，CD-077 保留向后兼容），最后默认 7 天。
+            keep_days = backup_cfg.get("backup_keep_days",
+                                       backup_cfg.get("backup_interval_days", 7))
             backup_dir = os.path.join(config_dir, "backups")
             os.makedirs(backup_dir, exist_ok=True)
 
-            timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d-%H%M%S")
-            src = CONFIG.DB_PATH
-            dst = os.path.join(backup_dir, f"sync_hub.{timestamp}.db")
-            shutil.copy2(src, dst)
-            logger.info(f"数据库备份完成: {dst}")
+            # 复用 CLI 的同一实现（VACUUM INTO + chroma 目录 + marker/manifest 对齐）
+            import hub_cli
+            result = hub_cli.cmd_backup(backup_dir, CONFIG.DB_PATH, CONFIG.CHROMA_PATH)
+            logger.info(f"数据库备份完成: {result.get('sqlite')}")
 
-            # 清理过期备份
-            cutoff = datetime.now(timezone.utc).timestamp() - keep_days * 86400
-            for fname in os.listdir(backup_dir):
-                if fname.startswith("sync_hub.") and fname.endswith(".db"):
-                    fpath = os.path.join(backup_dir, fname)
-                    if os.path.getmtime(fpath) < cutoff:
-                        os.remove(fpath)
-                        logger.info(f"清理过期备份: {fname}")
+            # 清理过期备份（覆盖新形态产物：db / manifest.json / chroma_db）
+            self._cleanup_old_backups(backup_dir, keep_days)
         except Exception as e:
-            logger.warning(f"数据库备份失败: {e}")
+            logger.error(f"数据库备份失败({type(e).__name__}): {e}")
+            # CD-077：失败必须留可机器判读的痕迹，不再静默（参照 hub_core._log_event 口径）
+            try:
+                await self._log_event(
+                    "backup_failed", "__system__",
+                    {"error": str(e), "error_type": type(e).__name__,
+                     "backup_dir": os.path.join(
+                         os.environ.get("SYNC_HUB_CONFIG_DIR", "./config"), "backups")},
+                )
+            except Exception as log_exc:
+                logger.error(f"backup_failed 事件落链失败: {log_exc}")
+
+    def _cleanup_old_backups(self, backup_dir: str, keep_days: int = 7) -> None:
+        """清理过期备份产物（CD-077）：只动本实现自己创建的东西。
+
+        - 命名匹配：`sync_hub.*.db` / `manifest.json` / `chroma_db/`（目录）
+        - 判据：mtime 早于 now - keep_days*86400
+        - **外来文件一律不碰**（如运维手工放进来的 manual_important.db、user_notes/）
+        - 清理失败只告警，绝不影响备份主流程
+        """
+        cutoff = datetime.now(timezone.utc).timestamp() - keep_days * 86400
+        try:
+            names = os.listdir(backup_dir)
+        except OSError as e:
+            logger.warning(f"备份目录不可读，跳过清理: {e}")
+            return
+        for fname in names:
+            fpath = os.path.join(backup_dir, fname)
+            try:
+                if os.path.getmtime(fpath) >= cutoff:
+                    continue
+                if fname.startswith("sync_hub.") and fname.endswith(".db"):
+                    os.remove(fpath)
+                elif fname == "manifest.json":
+                    os.remove(fpath)
+                elif fname == "chroma_db" and os.path.isdir(fpath):
+                    shutil.rmtree(fpath, ignore_errors=True)
+                else:
+                    continue  # 非本实现产物：不碰
+                logger.info(f"清理过期备份: {fname}")
+            except OSError as e:
+                logger.warning(f"清理过期备份失败({fname}): {e}")
 
 
     async def _run_cleanup(self):
