@@ -15,40 +15,61 @@ from notifications import notifications
 from routes_common import (
     NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
     _scope_client_ip, get_current_agent, get_current_agent_optional,
+    get_current_principal, principal_is_privileged, require_role,
 )
 
 router = APIRouter()
 
 @router.post("/api/v1/hub-agent/configure")
-async def api_hub_agent_configure(cfg: HubAgentConfig):
-    """配置 LLM provider"""
+async def api_hub_agent_configure(cfg: HubAgentConfig,
+                                  current_agent: str = Depends(get_current_agent)):
+    """配置 LLM provider（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可配置 Hub Agent")
     return hub_agent.configure(cfg)
 
 
 @router.post("/api/v1/hub-agent/disclosure-rules")
-async def api_hub_agent_set_rules(rules: DisclosureRules):
-    """设置披露审计规则"""
+async def api_hub_agent_set_rules(rules: DisclosureRules,
+                                  current_agent: str = Depends(get_current_agent)):
+    """设置披露审计规则（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可设置披露审计规则")
     return hub_agent.set_disclosure_rules(rules)
 
 
 @router.get("/api/v1/hub-agent/config")
-async def api_hub_agent_get_config(raw: bool = False):
-    """获取当前配置（默认脱敏 api_key，传 ?raw=true 返回原始值供 Agent 端使用）"""
+async def api_hub_agent_get_config(raw: bool = False,
+                                   current_agent: str = Depends(get_current_agent),
+                                   principal=Depends(get_current_principal)):
+    """获取当前配置（默认脱敏 api_key；?raw=true 仅特权主体返回原始值，非特权仍得脱敏版）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可查看 Hub Agent 配置")
     cfg = hub_agent._get_config()
-    if not raw and cfg.get("api_key"):
+    if not (raw and principal_is_privileged(principal)) and cfg.get("api_key"):
         cfg["api_key"] = cfg["api_key"][:8] + "..." + cfg["api_key"][-4:] if len(cfg["api_key"]) > 12 else "***"
     return cfg
 
 
 @router.post("/api/v1/hub-agent/test")
-async def api_hub_agent_test():
-    """测试 LLM 连通性"""
+async def api_hub_agent_test(current_agent: str = Depends(get_current_agent)):
+    """测试 LLM 连通性（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可测试 Hub Agent 连通性")
     return await hub_agent.test_connection()
 
 
 @router.post("/api/v1/hub-agent/audit/{request_id}")
-async def api_hub_agent_audit(request_id: str):
-    """手动对指定披露请求执行 LLM 审计"""
+async def api_hub_agent_audit(request_id: str,
+                              current_agent: str = Depends(get_current_agent)):
+    """手动对指定披露请求执行 LLM 审计（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可触发 Hub Agent 审计")
     conn = sqlite3.connect(CONFIG.DB_PATH)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
@@ -71,7 +92,12 @@ class ChatRequest(BaseModel):
 
 
 @router.post("/api/v1/hub-agent/chat")
-async def api_hub_agent_chat(req: ChatRequest):
+async def api_hub_agent_chat(req: ChatRequest,
+                             current_agent: str = Depends(get_current_agent)):
+    """Hub Agent 对话（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可使用 Hub Agent 对话")
     msg = req.message
     session_id = req.session_id
     if not msg:
@@ -121,7 +147,8 @@ async def api_hub_agent_chat(req: ChatRequest):
                 chat_history = messages[:]
                 user_input = "继续处理"
 
-            result = hub_agent._lc_chain.invoke(
+            result = await asyncio.to_thread(
+                hub_agent._lc_chain.invoke,
                 {"chat_history": chat_history, "input": user_input}
             )
             messages.append(result)
@@ -131,7 +158,7 @@ async def api_hub_agent_chat(req: ChatRequest):
                 tool = hub_agent._tool_map.get(tc['name'])
                 if tool:
                     try:
-                        tool_out = tool.invoke(tc['args'])
+                        tool_out = await asyncio.to_thread(tool.invoke, tc['args'])
                     except Exception as e:
                         tool_out = f"工具错误: {e}"
                 else:
@@ -157,6 +184,10 @@ async def api_hub_agent_chat(req: ChatRequest):
 @router.post("/api/v1/hub-agent/chat/clear")
 async def api_hub_agent_clear_history(req: dict,
                                        current_agent: str = Depends(get_current_agent)):
+    """清空对话历史（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可清空 Hub Agent 对话历史")
     from routes_n1 import _n1_gate
     _gate = await _n1_gate(current_agent, "chat_clear",
                            {"session_id": req.get("session_id", "default")})
@@ -173,8 +204,12 @@ async def api_hub_agent_clear_history(req: dict,
 
 
 @router.get("/api/v1/hub-agent/chat/history")
-async def api_hub_agent_chat_history(session_id: str = "default"):
-    """获取对话历史"""
+async def api_hub_agent_chat_history(session_id: str = "default",
+                                     current_agent: str = Depends(get_current_agent)):
+    """获取对话历史（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可查看 Hub Agent 对话历史")
     # D-5 3-5a: langchain 缺失（未装向量栈）→ 明确降级响应，不抛 500 堆栈
     try:
         from hub_agent_lc import SQLiteChatHistory

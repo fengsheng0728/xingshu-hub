@@ -12,6 +12,7 @@ import pkgutil
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from logfmt import rotate_request_id
 from integrations.base import (CanonicalEntity, Connector, HubEvent,
                                decrypt_config_secrets, encrypt_config_secrets,
                                redact_config)
@@ -258,6 +259,7 @@ async def integration_scheduler(hub, registry: ConnectorRegistry,
     import asyncio
     while True:
         await asyncio.sleep(tick_sec)
+        rotate_request_id("integrations")  # CD-108：每轮 tick 轮换 request id
         try:
             with registry._db() as conn:
                 c = conn.cursor()

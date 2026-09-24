@@ -158,12 +158,14 @@ class TeamMixin:
             c.execute(
                 """INSERT INTO team_members
                    (local_agent_id, remote_hub_id, remote_hub_url, remote_agent_id, remote_api_key,
-                    hostname, user_name, role, department, paired_at, key_expires_at, shared_secret)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    hostname, user_name, role, department, paired_at, key_expires_at, shared_secret,
+                    remote_api_key_hash)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (agent_id, remote_hub_id, remote_url, remote_agent_id, remote_api_key,
                  req.get("hostname", ""), req.get("user_name", ""),
                  req.get("role", "worker"), req.get("department", ""),
-                 now, expires, session_key.hex()),  # P2: 落库共享密钥供联邦加密
+                 now, expires, session_key.hex(),  # P2: 落库共享密钥供联邦加密
+                 hashlib.sha256(remote_api_key.encode("utf-8")).hexdigest()),
             )
             conn.commit()
 
@@ -224,6 +226,11 @@ class TeamMixin:
 
     async def _handle_pair_exchange(self, code: str, agent_info: dict) -> dict:
         """处理对方的配对握手——X25519 DH + AES-GCM 加密返回 api_key"""
+        # SSRF 防护：写入 team_members 的 remote_hub_url 先过 URL 安全校验
+        # （与 accept_pairing 同口径 _validate_remote_url）；非空且非法 → 拒绝写入
+        _remote_url = (agent_info.get("remote_hub_url") or "").strip()
+        if _remote_url and not self._validate_remote_url(_remote_url):
+            return {"error": "URL 校验失败：仅允许内网 HTTP + 3060 端口", "url": _remote_url}
         with self._db() as conn:
             c = conn.cursor()
             c.execute("SELECT id, hub_id_a, agent_id_a FROM pairing_codes WHERE code = ? AND expires_at > datetime('now') AND used = 0", (code,))
@@ -274,8 +281,9 @@ class TeamMixin:
             c.execute(
                 """INSERT OR IGNORE INTO team_members
                    (local_agent_id, remote_hub_id, remote_hub_url, remote_agent_id, remote_api_key,
-                    hostname, user_name, role, department, paired_at, key_expires_at, shared_secret)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    hostname, user_name, role, department, paired_at, key_expires_at, shared_secret,
+                    remote_api_key_hash)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (agent_id_a,
                  hub_id_a,
                  agent_info.get("remote_hub_url", ""),
@@ -285,13 +293,17 @@ class TeamMixin:
                  agent_info.get("user_name", ""),
                  "worker",
                  agent_info.get("department", ""),
-                 now, expires, session_key.hex()),  # P2: 落库共享密钥供联邦加密
+                 now, expires, session_key.hex(),  # P2: 落库共享密钥供联邦加密
+                 hashlib.sha256(api_key.encode("utf-8")).hexdigest()),
             )
             # 已存在配对记录时（重配对/更新），同步刷新 shared_secret
             c.execute(
-                "UPDATE team_members SET shared_secret = ?, remote_api_key = ? "
+                "UPDATE team_members SET shared_secret = ?, remote_api_key = ?, "
+                "remote_api_key_hash = ? "
                 "WHERE local_agent_id = ? AND remote_hub_id = ?",
-                (session_key.hex(), api_key, agent_id_a, hub_id_a),
+                (session_key.hex(), api_key,
+                 hashlib.sha256(api_key.encode("utf-8")).hexdigest(),
+                 agent_id_a, hub_id_a),
             )
             conn.commit()
 

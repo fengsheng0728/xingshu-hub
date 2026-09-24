@@ -94,14 +94,18 @@ def test_search_chunks_basic(monkeypatch):
     engine = DisclosureEngine(hub)
 
     async def run():
+        # CD-100：本用例验证 8 规则链判定本身（owner/manager 视角），非 scope 语义——
+        # 显式声明进程内全信主体（internal=True），等同修复前的无 cap 直调。
         # owner 查自己 → full
-        r1 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-1", limit=10)
+        r1 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-1", limit=10,
+                                        internal=True)
         assert r1["status"] == "ok"
         assert len(r1["results"]) == 5, f"owner 应见 5 块，实际 {len(r1['results'])}"
         assert r1["parent_hint"] is True
         assert "total_chunks" not in r1, "E.3: 不得泄露 total_chunks"
         # manager 查下属 → summary 级可见
-        r2 = await engine.search_chunks("req-B", "项目进展", doc_id="doc-1", limit=10)
+        r2 = await engine.search_chunks("req-B", "项目进展", doc_id="doc-1", limit=10,
+                                        internal=True)
         assert len(r2["results"]) > 0, f"manager 应见下属 chunk，实际 0"
         for res in r2["results"]:
             assert res["disclosure_level"] in ("summary", "full"), res
@@ -149,7 +153,9 @@ def test_slow_stitch_degrade(monkeypatch):
         # 慢速拼接：owner 自查（规则1 FULL，能拿全文）每次查 3 块（30%），分 10 次
         # 累计超过 50% 后 FULL 被降为 SUMMARY → degraded=True
         for i in range(10):
-            r = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-2", limit=3)
+            # CD-100：滑窗累计语义与 scope 无关，显式 internal=True（进程内全信主体）
+            r = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-2", limit=3,
+                                           internal=True)
             assert r["status"] == "ok"
             assert r["parent_hint"] is True
             if r.get("degraded"):
@@ -188,6 +194,119 @@ def test_parent_hint_boolean():
     # min 语义：summary < full → min(summary, full) = summary
     assert min(DisclosureLevel.SUMMARY, DisclosureLevel.FULL, key=_level_rank) == DisclosureLevel.SUMMARY
     print("PASS test_parent_hint_boolean (min 语义)")
+
+
+# ── 5. scoped key level_cap 生效（修复轮：search_chunks 叠加 scope）──
+
+def test_search_chunks_scope_level_cap(monkeypatch):
+    """scoped key 的 level_cap 必须封顶 chunk 检索结果；显式 internal 主体不受影响"""
+    tmpdir = tempfile.mkdtemp(prefix="h3t-scope-")
+    tmpdb = os.path.join(tmpdir, "test.db")
+    conn = sqlite3.connect(tmpdb)
+    conn.execute("""CREATE TABLE IF NOT EXISTS document_chunks (
+        chunk_id TEXT PRIMARY KEY, parent_doc_id TEXT NOT NULL, piece_index INTEGER NOT NULL,
+        content TEXT NOT NULL, summary TEXT, source_agent_id TEXT DEFAULT '',
+        trust_level TEXT DEFAULT 'trusted', tainted_at TEXT, disclosure_level TEXT DEFAULT 'summary',
+        sensitivity_score REAL DEFAULT 0.0, chunk_hash TEXT NOT NULL, kind TEXT DEFAULT 'fact',
+        pii_hits TEXT DEFAULT '[]', created_at TEXT, updated_at TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT,
+        agent_id TEXT, payload TEXT, timestamp TEXT)""")
+    now = "2026-08-06T00:00:00"
+    for i in range(3):
+        conn.execute(
+            "INSERT OR REPLACE INTO document_chunks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (f"doc-s-c{i}", "doc-s", i, f"chunk 内容 {i} 关于项目进展", f"摘要 {i}",
+             "owner-A", "trusted", "", "full", 0.0, f"hash-{i}", "fact", "[]", now, now))
+    conn.commit()
+    conn.close()
+
+    _use_test_db(tmpdb, monkeypatch)
+    hub = SyncHub()
+    hub.agents["owner-A"] = {"agent_id": "owner-A", "role": "worker", "department": "t"}
+    engine = DisclosureEngine(hub)
+
+    async def run():
+        # 显式 internal（进程内全信主体，CD-100）：owner 查自己 → full（向后兼容，
+        # 行为不变——修复前「无 scope」即此语义，现在必须显式声明）
+        r1 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-s", limit=10,
+                                        internal=True)
+        assert r1["results"] and all(
+            res["disclosure_level"] == "full" for res in r1["results"]), r1["results"]
+        # scope level_cap=summary：同一请求方被封顶到 summary（修复前裸调
+        # _calculate_disclosure_level，cap 被绕过）
+        r2 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-s", limit=10,
+                                        scope={"level_cap": "summary"})
+        assert r2["results"], "cap 生效后仍应有结果"
+        for res in r2["results"]:
+            assert res["disclosure_level"] == "summary", res
+            assert "chunk 内容" not in res["content"], "cap 后不得给全文"
+        # scope level_cap=none：封顶到不可见 → 空结果
+        r3 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-s", limit=10,
+                                        scope={"level_cap": "none"})
+        assert r3["results"] == [], r3["results"]
+        return True
+
+    assert asyncio.run(run())
+    print("PASS test_search_chunks_scope_level_cap")
+
+
+# ── 6. CD-100：未传 scope 的进程内直调 fail-closed（metadata 封顶）──
+
+def test_search_chunks_no_scope_fail_closed(monkeypatch):
+    """CD-100：直调 search_chunks 不声明主体上下文 → 按 metadata 封顶（无正文）；
+    显式 scope=None（普通 api_key 主体，路由层口径）→ 不受影响"""
+    tmpdir = tempfile.mkdtemp(prefix="h3t-fc-")
+    tmpdb = os.path.join(tmpdir, "test.db")
+    conn = sqlite3.connect(tmpdb)
+    conn.execute("""CREATE TABLE IF NOT EXISTS document_chunks (
+        chunk_id TEXT PRIMARY KEY, parent_doc_id TEXT NOT NULL, piece_index INTEGER NOT NULL,
+        content TEXT NOT NULL, summary TEXT, source_agent_id TEXT DEFAULT '',
+        trust_level TEXT DEFAULT 'trusted', tainted_at TEXT, disclosure_level TEXT DEFAULT 'summary',
+        sensitivity_score REAL DEFAULT 0.0, chunk_hash TEXT NOT NULL, kind TEXT DEFAULT 'fact',
+        pii_hits TEXT DEFAULT '[]', created_at TEXT, updated_at TEXT)""")
+    conn.execute("""CREATE TABLE IF NOT EXISTS events (
+        event_id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT,
+        agent_id TEXT, payload TEXT, timestamp TEXT)""")
+    now = "2026-08-06T00:00:00"
+    # 三份文档隔离三次调用——同一 (requester, doc) 的 24h 防拼接滑窗会把后续
+    # FULL 降级 SUMMARY（附录 E.3 既有语义），混在一起测分不清 cap 与滑窗
+    for d in ("doc-f0", "doc-f1", "doc-f2"):
+        for i in range(3):
+            conn.execute(
+                "INSERT OR REPLACE INTO document_chunks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"{d}-c{i}", d, i, f"chunk 内容 {i} 关于项目进展", f"摘要 {i}",
+                 "owner-A", "trusted", "", "full", 0.0, f"hash-{d}-{i}", "fact", "[]", now, now))
+    conn.commit()
+    conn.close()
+
+    _use_test_db(tmpdb, monkeypatch)
+    hub = SyncHub()
+    hub.agents["owner-A"] = {"agent_id": "owner-A", "role": "worker", "department": "t"}
+    engine = DisclosureEngine(hub)
+
+    async def run():
+        # 未传 scope（进程内直调，未声明主体上下文）→ fail-closed metadata 封顶：
+        # owner 查自己（规则1 本判 FULL）也只给元数据级，正文绝不出门
+        r0 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-f0", limit=10)
+        assert r0["results"], "metadata 级仍应列出命中（chunk_id/级别）"
+        for res in r0["results"]:
+            assert res["disclosure_level"] == "metadata", res
+            assert "chunk 内容" not in res["content"], "fail-closed：未声明主体不得给正文"
+        # 显式 scope=None（普通 api_key 主体，routes_pipeline 路由层口径）→ 规则1 FULL 不变
+        r1 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-f1", limit=10,
+                                        scope=None)
+        assert r1["results"] and all(
+            res["disclosure_level"] == "full" for res in r1["results"]), r1["results"]
+        # 显式 internal=True（进程内全信主体）→ 原文
+        r2 = await engine.search_chunks("owner-A", "项目进展", doc_id="doc-f2", limit=10,
+                                        internal=True)
+        assert r2["results"] and all(
+            res["disclosure_level"] == "full" for res in r2["results"]), r2["results"]
+        return True
+
+    assert asyncio.run(run())
+    print("PASS test_search_chunks_no_scope_fail_closed")
 
 
 if __name__ == "__main__":

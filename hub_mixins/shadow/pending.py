@@ -19,6 +19,9 @@ class PendingMixin:
         """共享连接（须在 _pend_lock 内调用）。防御性建表兜底（正式迁移在 db.py v6）。"""
         if self._pend_db_conn is None:
             conn = sqlite3.connect(self._pending_db, check_same_thread=False)
+            # 与 outbox 消费者同口径（outbox.py: busy_timeout=5000）——影子 flush
+            # 与主库写并发时短等而非瞬时 database is locked 降级。
+            conn.execute("PRAGMA busy_timeout = 5000")
             conn.execute(_PEND_DDL)
             conn.commit()
             self._pend_db_conn = conn

@@ -638,95 +638,116 @@ class SyncHub(BufferMixin, DashboardMixin, DisclosureOpsMixin, IngestMixin, Know
             # CD-020：已注册 agent 的角色真相在服务端——register/bootstrap（连接初始化）
             # 不得改动既有 role（原实现 INSERT OR REPLACE 用请求 role 覆盖，
             # Agent 端 bootstrap 写死 worker 会把 manager/orchestrator 静默降级，
-            # 知识写入变 403 且无任何「角色被重置」提示）。首次注册才采信请求 role。
-            role = (existing["role"] if existing and existing["role"] else "") or agent.role
+            # 知识写入变 403 且无任何「角色被重置」提示）。
+            # CD-099（2026-09-23，H-4 默认值收口）：首次注册强制 worker——自报 role /
+            # managed_agents / disclosure_policy 均属提权维度，一律不采信（原「首次注册
+            # 采信请求 role」意味着任何能注册成功的客户端可自封 orchestrator）。角色与
+            # 管辖关系变更只能走管理端点（routes_agents 既有端点不动）。
+            if existing and existing["role"]:
+                role = existing["role"]
+                managed_agents = agent.managed_agents
+                disclosure_policy = agent.disclosure_policy
+            else:
+                role = "worker"
+                managed_agents = []
+                disclosure_policy = {}
             conn_check.close()
 
+            conn = self._db()
+            try:
+                c = conn.cursor()
+                if hashed:
+                    c.execute(
+                        """
+                        INSERT OR REPLACE INTO agents
+                        (agent_id, agent_name, department, capabilities, role,
+                         managed_agents, disclosure_policy, endpoint, registered_at,
+                         last_heartbeat, status, api_key, api_key_hash,
+                         api_key_created_at, api_key_expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            agent.agent_id,
+                            agent.agent_name,
+                            agent.department,
+                            json.dumps(agent.capabilities),
+                            role,
+                            json.dumps(managed_agents),
+                            json.dumps(disclosure_policy),
+                            agent.endpoint,
+                            now,
+                            now,
+                            "online",
+                            "",  # T1-2：明文列保持清空
+                            key_hash,
+                            now,
+                            self._api_key_expiry(now),
+                        ),
+                    )
+                else:
+                    c.execute(
+                        """
+                        INSERT OR REPLACE INTO agents
+                        (agent_id, agent_name, department, capabilities, role,
+                         managed_agents, disclosure_policy, endpoint, registered_at,
+                         last_heartbeat, status, api_key, api_key_created_at, api_key_expires_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            agent.agent_id,
+                            agent.agent_name,
+                            agent.department,
+                            json.dumps(agent.capabilities),
+                            role,
+                            json.dumps(managed_agents),
+                            json.dumps(disclosure_policy),
+                            agent.endpoint,
+                            now,
+                            now,
+                            "online",
+                            issued_key,
+                            now,
+                            self._api_key_expiry(now),
+                        ),
+                    )
+                conn.commit()
+
+                # O4：默认配额行（alert_only 零影响；INSERT OR IGNORE 不覆盖已有配置）。
+                # 必须在 close 之前用同一连接写——旧代码在 conn.close() 之后才
+                # conn.cursor()，ProgrammingError 被 except 吞掉，默认配额行从未写入。
+                try:
+                    c.execute(
+                        "INSERT OR IGNORE INTO agent_quotas (agent_id, qps_limit, mode, window_sec, burst) VALUES (?, ?, ?, ?, ?)",
+                        (agent.agent_id, 50.0, "alert_only", 1.0, 3))
+                    conn.commit()
+                except Exception:
+                    pass  # 表不存在(旧库) → 跳过,配额检查默认放行
+            finally:
+                # INSERT 失败（如触发器/磁盘故障）也必须关连接——旧代码异常路径
+                # 直接泄漏连接持锁，后续访问 database is locked。
+                conn.close()
+
+            # DB 写成功后才更新内存镜像——旧顺序（先写内存后 INSERT）下 DB 失败
+            # 会留下无库对应的内存残留（要等重启 _restore_agents 才自愈）。
             self.agents[agent.agent_id] = {
                 "agent_id": agent.agent_id,
                 "agent_name": agent.agent_name,
                 "department": agent.department,
                 "capabilities": agent.capabilities,
                 "role": role,
-                "managed_agents": agent.managed_agents,
+                "managed_agents": managed_agents,
                 "status": "online",
                 "last_heartbeat": now,
                 # T1-2：hash 模式内存 dict 不持明文（backfeed 指纹等消费方退化为空）
                 "api_key": "" if hashed else issued_key,
             }
 
-            conn = self._db()
-            c = conn.cursor()
-            if hashed:
-                c.execute(
-                    """
-                    INSERT OR REPLACE INTO agents
-                    (agent_id, agent_name, department, capabilities, role,
-                     managed_agents, disclosure_policy, endpoint, registered_at,
-                     last_heartbeat, status, api_key, api_key_hash,
-                     api_key_created_at, api_key_expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        agent.agent_id,
-                        agent.agent_name,
-                        agent.department,
-                        json.dumps(agent.capabilities),
-                        role,
-                        json.dumps(agent.managed_agents),
-                        json.dumps(agent.disclosure_policy),
-                        agent.endpoint,
-                        now,
-                        now,
-                        "online",
-                        "",  # T1-2：明文列保持清空
-                        key_hash,
-                        now,
-                        self._api_key_expiry(now),
-                    ),
-                )
-            else:
-                c.execute(
-                    """
-                    INSERT OR REPLACE INTO agents
-                    (agent_id, agent_name, department, capabilities, role,
-                     managed_agents, disclosure_policy, endpoint, registered_at,
-                     last_heartbeat, status, api_key, api_key_created_at, api_key_expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        agent.agent_id,
-                        agent.agent_name,
-                        agent.department,
-                        json.dumps(agent.capabilities),
-                        role,
-                        json.dumps(agent.managed_agents),
-                        json.dumps(agent.disclosure_policy),
-                        agent.endpoint,
-                        now,
-                        now,
-                        "online",
-                        issued_key,
-                        now,
-                        self._api_key_expiry(now),
-                    ),
-                )
-            conn.commit()
-            conn.close()
-
-            # O4：默认配额行（alert_only 零影响；INSERT OR IGNORE 不覆盖已有配置）
-            try:
-                qc = conn.cursor()
-                qc.execute(
-                    "INSERT OR IGNORE INTO agent_quotas (agent_id, qps_limit, mode, window_sec, burst) VALUES (?, ?, ?, ?, ?)",
-                    (agent.agent_id, 50.0, "alert_only", 1.0, 3))
-                conn.commit()
-            except Exception:
-                pass  # 表不存在(旧库) → 跳过,配额检查默认放行
-
-            await self._log_event("agent_register", agent.agent_id, {
-                "role": agent.role, "department": agent.department
-            })
+            # CD-099：首注自报提权维度被忽略时审计留痕（不静默丢弃）
+            _reg_event = {"role": role, "department": agent.department}
+            if not existing and (agent.role != "worker" or agent.managed_agents
+                                 or agent.disclosure_policy):
+                _reg_event["self_reported_privilege_ignored"] = True
+            await self._log_event("agent_register", agent.agent_id, _reg_event)
             return {"status": "registered", "agent_id": agent.agent_id,
                     "api_key": issued_key}
 

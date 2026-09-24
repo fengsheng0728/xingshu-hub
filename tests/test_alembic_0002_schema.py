@@ -40,10 +40,10 @@ def test_0002_upgrade_head_empty_db(tmp_path):
     try:
         version = conn.execute(
             "SELECT version_num FROM alembic_version").fetchone()[0]
-        # head 已前进到 0008（CD-024 增长型表索引）
-        # 版本随 CD-024 变更：head 版本号属「版本指针」类断言，新增迁移必须同步 bump
-        # （0005 / 0006 / 0007 落地时同样处理过本行）
-        assert version == "0010_employee_keys"
+        # head 已前进到 0013（终审断点 3：兜底补列 agents hash 列）
+        # 版本随迁移变更：head 版本号属「版本指针」类断言，新增迁移必须同步 bump
+        # （0005 / 0006 / 0007 / 0010 / 0011 / 0012 落地时同样处理过本行）
+        assert version == "0014_team_members_remote_api_key_hash"
         # 代表列：0002 增量 ALTER 产物
         assert "api_key_prev" in _cols(conn, "agents")
         assert "full_access" in _cols(conn, "agents")
@@ -60,7 +60,7 @@ def test_0002_upgrade_head_empty_db(tmp_path):
             "SELECT name FROM sqlite_master WHERE type='table'")}
         for t in ("messages", "review_queue", "shadow_pending",
                   "agent_keys", "integrations_state", "audit_log",
-                  "event_outbox"):
+                  "event_outbox", "dead_letters", "evaluation_tasks"):
             assert t in tables
     finally:
         conn.close()

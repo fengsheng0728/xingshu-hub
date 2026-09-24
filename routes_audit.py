@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from pydantic import BaseModel as PydanticBase, Field as PydanticField
 
+from logfmt import rotate_request_id
 from models import CONFIG
 from hub_core import hub, hub_agent
 from notifications import notifications
@@ -462,6 +463,163 @@ async def api_audit_anchor_status(current_agent: str = Depends(get_current_agent
             "tsa_url": getattr(CONFIG, "AUDIT_TSA_URL", "") or DEFAULT_TSA_URL}
 
 
+def _collect_token_verifications(tsr: str, tsa_dir: str) -> List[Dict]:
+    """TSA 令牌离线验签集合（同步；由 asyncio.to_thread 调用，不占事件循环）。
+
+    - 显式 `tsr`：单令牌验签，判据同 `scripts/verify_tsa_anchor.py token`
+      （chain_head 取当前主链链头，pins 走配置）
+    - 否则遍历 tsa 目录 `index.jsonl` 的 ok 记录逐个验签，判据同脚本 `tsa-dir`；
+      `index.jsonl` 不存在 → 空列表（不报错）
+    单条异常/缺文件不拖垮整批：记 `unverified` + reason（读不到不是篡改证据），
+    与脚本退出码语义一致（unverified ≠ failed）。
+    """
+    from audit_chain import (
+        verify_tsa_token, current_chain_head, tsa_out_dir, _load_trusted_fingerprints,
+    )
+    if tsr:
+        head = current_chain_head(CONFIG.DB_PATH) or ""
+        try:
+            r = verify_tsa_token(tsr, head, None)
+        except Exception as e:
+            r = {"status": "unverified",
+                 "reason": f"tsr_unreadable: {type(e).__name__}: {e}"[:200]}
+        return [{"tsr": tsr, "anchor": (head or "")[:16], **r}]
+    out_dir = tsa_out_dir(tsa_dir)
+    idx = os.path.join(out_dir, "index.jsonl")
+    if not os.path.isfile(idx):
+        return []
+    try:
+        with open(idx, "r", encoding="utf-8") as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except Exception as e:
+        logger.warning("tsa index 读取失败（tokens 记空，不阻塞响应）: %s", e)
+        return []
+    pins = _load_trusted_fingerprints()
+    details: List[Dict] = []
+    for rec in rows:
+        if rec.get("status") != "ok" or not rec.get("tsr"):
+            continue
+        tsr_path = rec["tsr"]
+        if not os.path.isfile(tsr_path):
+            details.append({"tsr": tsr_path, "status": "unverified",
+                            "reason": "tsr_file_missing"})
+            continue
+        try:
+            r = verify_tsa_token(tsr_path, rec.get("anchor") or "", pins)
+        except Exception as e:
+            r = {"status": "unverified",
+                 "reason": f"tsr_unreadable: {type(e).__name__}: {e}"[:200]}
+        details.append({"tsr": tsr_path,
+                        "anchor": (rec.get("anchor") or "")[:16], **r})
+    return details
+
+
+def _anchors_mismatches(anchors: Dict) -> List[Dict]:
+    """从 fetch_and_verify_anchors 结果提取不一致项（最多 5 条）。
+
+    只收真 mismatch（成功取回但锚不在链中）；`unverified`/`rejected` 取不回/被拒，
+    不是篡改证据，**不混进 mismatches**（口径见 audit_chain.fetch_and_verify_anchors
+    docstring 与本任务 3.2b）。
+    """
+    mm = anchors.get("mismatches")
+    if isinstance(mm, list):
+        return mm[:5]
+    return [r for r in (anchors.get("results") or [])
+            if r.get("status") == "mismatch"][:5]
+
+
+@router.post("/api/audit/anchor/verify")
+async def api_audit_anchor_verify(request: Request,
+                                  current_agent: str = Depends(get_current_agent)):
+    """CD-106：TSA 验签 HTTP 出口（重运维端点：hub_token/manager/orchestrator）。
+
+    把离线脚本 `scripts/verify_tsa_anchor.py` 的 `token` + `tsa-dir` + `anchors`
+    判据搬到端点；验签 `failed` 自动落 `anchor_mismatch` 审计 + dashboard 安全通知
+    （复用既有 `_anchor_alarm`）。
+
+    **本端点不主动联网**：不发起盖章，也不取远端锚——要取远端锚需显式传 `urls`
+    （不传时 `fetch_and_verify_anchors` 收到空列表 = 休眠态）。
+
+    请求体（JSON，全部可选）：
+      - `tsr`：.tsr 令牌文件路径 → 只验这一个令牌（不传则遍历 tsa index.jsonl）
+      - `urls`：远端锚 URL 列表 → 显式取回比对（不传 = 不联网）
+      - `tsa_dir`：tsa 产物目录（缺省 env SYNC_HUB_TSA_DIR / audit/tsa）
+
+    返回体字段来源：
+      - `chain.local_anchor`：`audit_chain.verify_anchor`（本地锚 vs 链头）
+      - `chain.tsa_stamped_head`：`audit_chain.verify_tsa`（被盖章链头是否仍在链中）
+      - `anchors`：`audit_chain.fetch_and_verify_anchors`（远端锚取回比对）
+      - `tokens`：`audit_chain.verify_tsa_token` 批量结果（显式 tsr 或 index.jsonl 遍历）
+      - `trusted_fingerprints_configured`：`audit_chain._load_trusted_fingerprints()` 非空
+        （false 时 tokens 多为 unverified = 未钉扎，fail-closed 不假绿）
+
+    告警口径（unverified ≠ failed，不触发 anchor_mismatch）：
+      1. 任一 token `status == "failed"` → `_anchor_alarm({"source": "http_verify", "tokens": [...]})`
+      2. `anchors` 出现**真 mismatch**（成功取回但锚不在链中，status=='mismatch'）→ 告警；
+         `db_unavailable` / `unverified` / `rejected` 不是篡改证据，**不落**
+         `anchor_mismatch`（验收裁决 2026-09-24，见下方实现注释）
+      3. `chain.tsa_stamped_head.valid is False` → `_anchor_alarm({"source": "http_verify", "mismatches": [...]})`
+    """
+    await require_ops_privilege(request, "POST /api/audit/anchor/verify", current_agent)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    tsr = str(body.get("tsr") or "").strip()
+    urls = [str(u).strip() for u in (body.get("urls") or [])
+            if isinstance(u, str) and u.strip()]
+    tsa_dir = str(body.get("tsa_dir") or "").strip()
+    from audit_chain import (verify_anchor, verify_tsa, fetch_and_verify_anchors,
+                             _load_trusted_fingerprints)
+    local, tsa = await asyncio.gather(
+        asyncio.to_thread(verify_anchor, CONFIG.DB_PATH),
+        asyncio.to_thread(verify_tsa, CONFIG.DB_PATH, tsa_dir),
+    )
+    # 联网策略：urls 显式传才取远端锚；空列表 = fetch_and_verify_anchors 休眠态
+    anchors = await asyncio.to_thread(fetch_and_verify_anchors, CONFIG.DB_PATH, urls)
+    tokens = await asyncio.to_thread(_collect_token_verifications, tsr, tsa_dir)
+    pins_configured = bool(await asyncio.to_thread(_load_trusted_fingerprints))
+
+    # (b) failed 自动落 anchor_mismatch + dashboard 通知（复用既有 _anchor_alarm；
+    #     unverified 不算 failed、不告警，但如实出现在 tokens 里）
+    failed_tokens = [t for t in tokens if t.get("status") == "failed"]
+    if failed_tokens:
+        await _anchor_alarm({"source": "http_verify",
+                             "tokens": [{"tsr": t.get("tsr"),
+                                         "status": t.get("status"),
+                                         "reason": t.get("reason")}
+                                        for t in failed_tokens[:5]]})
+    # CD-106 验收裁决（2026-09-24，Hermes）：`valid is False` 有两个来源——真 mismatch
+    # （锚成功取回但不在链中）与 db_unavailable（取不回、results 为空、带 error）。
+    # 后者不是篡改证据，落 anchor_mismatch 会把「库打不开」误报成「链被整段重写/截断」
+    # → 只在**真 mismatch 非空**时告警（unverified / rejected 同样不落）。
+    # 返回体仍照原样带 anchors.error，可见性不丢。
+    anchors_mismatches = _anchors_mismatches(anchors)
+    if anchors_mismatches:
+        await _anchor_alarm({"source": "http_verify",
+                             "mismatches": anchors_mismatches})
+    if tsa.get("valid") is False:
+        await _anchor_alarm({"source": "http_verify",
+                             "mismatches": (tsa.get("mismatches") or [])[:5]})
+
+    await log_ops_trigger("POST /api/audit/anchor/verify", current_agent, {
+        "tokens_checked": len(tokens),
+        "tokens_failed": len(failed_tokens),
+        "tokens_unverified": sum(1 for t in tokens if t.get("status") == "unverified"),
+        "anchors_checked": anchors.get("checked", 0),
+        "anchors_unverified": anchors.get("unverified", 0),
+        "chain_local_valid": local.get("valid"),
+        "chain_tsa_valid": tsa.get("valid"),
+    })
+    return {"status": "ok",
+            "chain": {"local_anchor": local, "tsa_stamped_head": tsa},
+            "anchors": anchors,
+            "tokens": tokens,
+            "trusted_fingerprints_configured": pins_configured}
+
+
 async def anchor_export_loop():
     """XS-004 + CD-034 R3：审计锚定周期外发（本机快照 / webhook）+ 链头外部盖章。
 
@@ -471,12 +629,12 @@ async def anchor_export_loop():
     from models import CONFIG
     _last_tsa = 0.0
     while True:
+        rotate_request_id("anchor-export")  # CD-108：每轮 tick 轮换 request id
         try:
             await asyncio.to_thread(export_anchor, CONFIG.DB_PATH)
         except Exception:
             pass  # 外发失败静默（export_anchor 内部已逐 url 容错，此处兜底）
         # CD-034 R3：链头外部时间戳（默认关；开启后按自身周期盖章 + 回拉比对 + 告警）
-        # DBG-REMOVED [[[: tsa_enabled={getattr(CONFIG, chr(65)+chr(85)+chr(68)+chr(73)+chr(84)+chr(95)+chr(84)+chr(83)+chr(65)+chr(95)+chr(69)+chr(78)+chr(65)+chr(66)+chr(76)+chr(69)+chr(68), None)} interval={getattr(CONFIG, chr(65)+chr(85)+chr(68)+chr(73)+chr(84)+chr(95)+chr(84)+chr(83)+chr(65)+chr(95)+chr(73)+chr(78)+chr(84)+chr(69)+chr(82)+chr(86)+chr(65)+chr(76), None)}\n".encode())
         try:
             if getattr(CONFIG, "AUDIT_TSA_ENABLED", False):
                 tsa_interval = max(60, int(getattr(CONFIG, "AUDIT_TSA_INTERVAL", 86400) or 86400))

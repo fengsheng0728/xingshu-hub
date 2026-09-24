@@ -88,7 +88,9 @@ CASES = [
     ("r6 店长", mem(), "orchestrator1", {}, DisclosureLevel.SUMMARY),
     ("r7 同级同部门", mem(), "bob", {}, DisclosureLevel.SUMMARY),
     ("r7 跨部门", mem(), "carol", {}, DisclosureLevel.SUMMARY),
-    ("r7 同任务", mem(), "bob", {"assigned_agent_id": "alice"}, DisclosureLevel.SUMMARY),
+    # 语义随修复轮变更：r7 仅看「请求方本人」是否参与任务（owner 参与不再放行）
+    ("r7 同任务", mem(), "bob", {"assigned_agent_id": "bob"}, DisclosureLevel.SUMMARY),
+    ("r7 仅owner在任务", mem(), "bob", {"assigned_agent_id": "alice"}, DisclosureLevel.SUMMARY),
     ("r8 级别上限", mem(level="metadata"), "manager1", {}, DisclosureLevel.FULL),
     ("r9 默认NONE", mem(), "unknown", {}, DisclosureLevel.SUMMARY),
 ]
@@ -113,6 +115,7 @@ def test_simulator_mirrors_real_engine(name, memory, requester, task, req_level)
         "r7 同级同部门": "r7_peer_collab",  # department_peer_visibility=False → allow_peer 无同任务 → NONE
         "r7 跨部门": "r7_peer_collab",
         "r7 同任务": "r7_peer_collab",
+        "r7 仅owner在任务": "r7_peer_collab",  # 新语义：请求方不在任务 → NONE（链尾）
         "r8 级别上限": "r5_manager_subordinate",  # manager1 查 alice(下属) 先中 r5,再按 default_manager_level
         "r9 默认NONE": "r4_5_role_fail_closed",  # 2b: unknown 无角色 → fail-closed 封顶 METADATA
     }

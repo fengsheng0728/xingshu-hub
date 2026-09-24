@@ -100,8 +100,11 @@ class Config:
     AUDIT_TSA_URL: str = ""            # 空 = 用 audit_chain.DEFAULT_TSA_URL（公共免费 TSA）
     AUDIT_TSA_INTERVAL: int = 86400    # 盖章周期秒（默认每日一次）
     HUB_TOKEN: str = ""  # 部署级单 token（config.yaml auth.hub_token）— 空=仅 api_key 认证
-    # OGA: 注册准入模式 — open=自注册(默认,内网兼容) | guarded=受管注册(需 hub_token,防匿名注册)
-    AUTH_REGISTRATION: str = "open"
+    # OGA: 注册准入模式 — guarded=受管注册(需 hub_token,防匿名注册) | open=自注册(仅可信内网)
+    # CD-099（2026-09-23，H-4 默认值收口）：默认 open→guarded（「配置正确才安全」→ 默认安全）。
+    # 旧内网部署/测试可在 config.yaml 显式写 open，或 env SYNC_HUB_REGISTRATION=open 回落
+    # （env 仅在 config 未显式写 auth.registration 时生效，见 _load_config_from_yaml）。
+    AUTH_REGISTRATION: str = "guarded"
     NOTIFY_CHANNELS: dict = None  # P2 通知多渠道（config.yaml notify_channels），惰性加载
     # P0 S4 暴露面收敛（2026-08-04）：WS 鉴权熔断 + REST 限速 + 联邦发现模式
     WS_AUTH_TIMEOUT_SEC: float = 3.0        # WS 首帧鉴权超时（可配置，禁止 <2s 防重连风暴）
@@ -109,6 +112,10 @@ class Config:
     WS_AUTH_WINDOW_SEC: int = 600           # 失败计数窗口（10 分钟）
     WS_AUTH_BAN_SEC: int = 1800             # 封禁时长（30 分钟）
     RATE_LIMIT_PER_IP: int = 1000           # REST 每 IP 每秒请求上限（默认远高于 200 并发压测基线）
+    # CD-080（2026-09-23）：可信代理列表（CIDR/IP，config.yaml server.trusted_proxies）。
+    # 默认空 = 不信任任何代理头（X-Forwarded-For 伪造不能绕过限速/熔断）；仅当直连
+    # 对端命中本列表才采信 XFF（取链首=原始客户端）。仅在 Hub 位于反向代理之后时配置。
+    TRUSTED_PROXIES: list = field(default_factory=list)
     FEDERATION_DISCOVERY: str = "multicast" # multicast | static
     FEDERATION_STATIC_PEERS: list = None    # static 模式节点清单 [{hub_id, host, port}]
 
@@ -144,6 +151,10 @@ class Config:
 
     # D-10(2026-09-10): db 门面慢查询阈值毫秒（0 = 每次调用都记 WARNING，仅测试用）
     DB_SLOW_QUERY_MS: int = 200
+    # CD-101（2026-09-23）：HTTP 请求体大小上限（Content-Length 快路径预检，超限 413）。
+    # 默认档 2MB；hub-agent chat / wiki import 等大文本端点按路径放行到 LARGE 档。
+    MAX_BODY_BYTES: int = 2 * 1024 * 1024
+    MAX_BODY_BYTES_LARGE: int = 8 * 1024 * 1024
 
 
 def _load_config_from_yaml() -> dict:
@@ -163,6 +174,17 @@ def _load_config_from_yaml() -> dict:
             server = cfg.get("server", {})
             if server.get("port"):
                 overrides["SERVER_PORT"] = int(server["port"])
+            # CD-080：可信代理列表（CIDR/IP，字符串按单元素列表收纳）
+            if server.get("trusted_proxies") is not None:
+                _tp = server["trusted_proxies"]
+                if isinstance(_tp, str):
+                    _tp = [_tp]
+                overrides["TRUSTED_PROXIES"] = [str(_x) for _x in _tp]
+            # CD-101：请求体上限可调（server.max_body_bytes / max_body_bytes_large）
+            if server.get("max_body_bytes") is not None:
+                overrides["MAX_BODY_BYTES"] = int(server["max_body_bytes"])
+            if server.get("max_body_bytes_large") is not None:
+                overrides["MAX_BODY_BYTES_LARGE"] = int(server["max_body_bytes_large"])
             auth = cfg.get("auth", {})
             if auth.get("hub_token"):
                 overrides["HUB_TOKEN"] = str(auth["hub_token"])
@@ -286,6 +308,12 @@ def _load_config_from_yaml() -> dict:
             raise ValueError(
                 f"config.yaml auth.registration 必须是 open 或 guarded, 当前值: {registration_raw!r}")
         overrides["AUTH_REGISTRATION"] = reg
+    # CD-099：env 回落口（仅 config 未显式写 auth.registration 时生效）——测试/旧内网
+    # 部署用；config 显式值优先（guarded 语义不被环境偷改）。
+    if registration_raw is None:
+        env_reg = os.environ.get("SYNC_HUB_REGISTRATION", "").strip()
+        if env_reg in ("open", "guarded"):
+            overrides["AUTH_REGISTRATION"] = env_reg
     # 环境变量覆盖（测试隔离用：独立测试 Hub 强制关影子，不碰生产 data-trunk）
     env_dt = os.environ.get("SYNC_HUB_DATA_TRUNK")
     if env_dt is not None:
@@ -368,120 +396,121 @@ PUBLIC_DOMAIN = "公共区"  # XS-001: 空域记忆归属域（员工模板 __pu
 
 # ============ 数据模型 ============
 class AgentRegistration(BaseModel):
-    agent_id: str
-    agent_name: str
-    department: str = ""                    # 部门（如"客服部"、"售后部"）
-    capabilities: List[str] = Field(default_factory=list)
-    role: str = "worker"                    # worker | manager | orchestrator
-    managed_agents: List[str] = Field(default_factory=list)
+    agent_id: str = Field(max_length=200)
+    agent_name: str = Field(max_length=200)
+    department: str = Field(default="", max_length=100)  # 部门（如"客服部"、"售后部"）
+    capabilities: List[str] = Field(default_factory=list, max_length=200)
+    role: str = Field(default="worker", max_length=50)  # worker | manager | orchestrator
+    managed_agents: List[str] = Field(default_factory=list, max_length=200)
     disclosure_policy: dict = Field(default_factory=dict)
-    endpoint: str = ""
+    endpoint: str = Field(default="", max_length=500)
 
 
 class MemoryBatchOp(BaseModel):
     """H3: 批量记忆操作单条"""
-    action: str  # "store" | "delete" | "search"
-    memory_key: str = ""
-    content: str = ""
-    kind: str = "fact"
-    source_type: str = "agent"
-    query: str = ""
-    limit: int = 10
+    action: str = Field(max_length=20)  # "store" | "delete" | "search"
+    memory_key: str = Field(default="", max_length=200)
+    content: str = Field(default="", max_length=100_000)
+    kind: str = Field(default="fact", max_length=50)
+    source_type: str = Field(default="agent", max_length=50)
+    query: str = Field(default="", max_length=4_000)
+    limit: int = Field(default=10, ge=1, le=200)  # CD-101：单条检索分页上限收口
 
 
 class MemoryEntry(BaseModel):
-    memory_key: str
-    content: str
-    summary: Optional[str] = None
+    memory_key: str = Field(max_length=200)
+    content: str = Field(max_length=100_000)  # CD-101：单条记忆正文上限
+    summary: Optional[str] = Field(default=None, max_length=50_000)
     embedding: Optional[List[float]] = None  # [可选] 配合 ChromaDB 使用
     importance: float = 1.0
-    tags: List[str] = Field(default_factory=list)
-    kind: str = "fact"  # fact | todo | profile | preference
-    source_session_id: str = ""
+    tags: List[str] = Field(default_factory=list, max_length=200)
+    kind: str = Field(default="fact", max_length=50)  # fact | todo | profile | preference
+    source_session_id: str = Field(default="", max_length=200)
     confidence: float = 1.0
-    source_type: str = "user"  # user | tool | system
-    trust_level: str = "internal"  # S3 taint: system | internal | federated | external
+    source_type: str = Field(default="user", max_length=50)  # user | tool | system
+    trust_level: str = Field(default="internal", max_length=50)  # S3 taint: system | internal | federated | external
     disclosure_level: DisclosureLevel = DisclosureLevel.SUMMARY
     disclosure_scope: DisclosureScope = DisclosureScope.MANAGER
-    allowed_viewers: List[str] = Field(default_factory=list)
+    allowed_viewers: List[str] = Field(default_factory=list, max_length=200)
 
 
 # M2: 会话摘要归档
 class SessionArchiveRequest(BaseModel):
-    agent_id: str
-    local_session_id: int
-    title: str = ""
-    summary: str = ""
-    key_facts: list = Field(default_factory=list)
-    msg_count: int = 0
+    agent_id: str = Field(max_length=200)
+    local_session_id: int = Field(ge=0)
+    title: str = Field(default="", max_length=500)
+    summary: str = Field(default="", max_length=50_000)
+    key_facts: list = Field(default_factory=list, max_length=500)
+    msg_count: int = Field(default=0, ge=0, le=10_000_000)
 
 
 # P0 团队协作: 会话接力 handoff
 class SessionHandoffRequest(BaseModel):
     """A 移交会话给 B: from_agent_id 必须 == 调用者(get_current_agent)"""
-    from_agent_id: str
-    to_agent_id: str
-    local_session_id: int
-    title: str = ""
-    summary: str = ""
-    key_facts: list = Field(default_factory=list)
-    messages: list = Field(default_factory=list)  # [{role, content}, ...] 最近 N 条全文
+    from_agent_id: str = Field(max_length=200)
+    to_agent_id: str = Field(max_length=200)
+    local_session_id: int = Field(ge=0)
+    title: str = Field(default="", max_length=500)
+    summary: str = Field(default="", max_length=50_000)
+    key_facts: list = Field(default_factory=list, max_length=500)
+    # CD-101：messages 条数封顶（[{role, content}, ...] 最近 N 条全文，防单请求搬运整段会话史）
+    messages: list = Field(default_factory=list, max_length=200)
 
 
 class TaskCreate(BaseModel):
-    task_id: str
-    description: str
-    creator_agent_id: str = ""
-    required_capabilities: List[str] = Field(default_factory=list)
-    required_memories: List[str] = Field(default_factory=list)
+    task_id: str = Field(max_length=200)
+    description: str = Field(max_length=50_000)
+    creator_agent_id: str = Field(default="", max_length=200)
+    required_capabilities: List[str] = Field(default_factory=list, max_length=200)
+    required_memories: List[str] = Field(default_factory=list, max_length=200)
     priority: int = 1
     disclosure_plan: Optional[dict] = None
-    depends_on: List[str] = Field(default_factory=list)  # P1 DAG: 前置任务 id 列表（向后兼容，默认空）
-    parent_task_id: Optional[str] = None  # P2: 所属父任务 id（拆解并行）
+    depends_on: List[str] = Field(default_factory=list, max_length=200)  # P1 DAG: 前置任务 id 列表（向后兼容，默认空）
+    parent_task_id: Optional[str] = Field(default=None, max_length=200)  # P2: 所属父任务 id（拆解并行）
 
 
 class DisclosureRequest(BaseModel):
-    task_id: str = ""
-    requester_agent_id: str
-    target_agent_id: str
-    query: str = ""
+    task_id: str = Field(default="", max_length=200)
+    requester_agent_id: str = Field(max_length=200)
+    target_agent_id: str = Field(max_length=200)
+    query: str = Field(default="", max_length=4_000)
     required_level: DisclosureLevel = DisclosureLevel.SUMMARY
 
 
 class SemanticSearchRequest(BaseModel):
-    query: str
-    requester_agent_id: str
-    n_results: int = 10
-    filter_owner: Optional[str] = None
-    filter_tags: Optional[List[str]] = None
+    query: str = Field(max_length=4_000)
+    requester_agent_id: str = Field(max_length=200)
+    n_results: int = Field(default=10, ge=1, le=200)  # CD-101：分页上限收口
+    filter_owner: Optional[str] = Field(default=None, max_length=200)
+    filter_tags: Optional[List[str]] = Field(default=None, max_length=200)
     # K-1（2026-09-16）：可选层过滤。"" = 不过滤（memory+knowledge 都查，向后兼容）；
     # "memory"/"knowledge" = 只查对应层。注意：无 layer 键的旧向量在显式 layer=memory 时不命中。
-    layer: str = ""
+    layer: str = Field(default="", max_length=20)
 
 
 class KnowledgeEntry(BaseModel):
-    entry_id: Optional[str] = None
-    title: str
-    content: str = ""
-    tags: List[str] = Field(default_factory=list)
-    links: List[str] = Field(default_factory=list)
-    category: str = "general"
+    entry_id: Optional[str] = Field(default=None, max_length=200)
+    title: str = Field(max_length=500)
+    content: str = Field(default="", max_length=100_000)
+    tags: List[str] = Field(default_factory=list, max_length=200)
+    links: List[str] = Field(default_factory=list, max_length=200)
+    category: str = Field(default="general", max_length=100)
     importance: float = 1.0
-    created_by: str = ""
+    created_by: str = Field(default="", max_length=200)
 
 class HubAgentConfig(BaseModel):
-    """Hub Agent 配置"""
-    provider: str = "openai"
-    api_key: str = ""
-    api_base: str = ""
-    model: str = "gpt-4o-mini"
-    temperature: float = 0.3
+    """Hub Agent 配置（CD-101：provider/api_key/api_base/model 长度封顶，temperature 限 0~2）"""
+    provider: str = Field(default="openai", max_length=50)
+    api_key: str = Field(default="", max_length=500)
+    api_base: str = Field(default="", max_length=500)
+    model: str = Field(default="gpt-4o-mini", max_length=200)
+    temperature: float = Field(default=0.3, ge=0.0, le=2.0)
     enabled: bool = False
     auto_approve: bool = False
 
 class DisclosureRules(BaseModel):
     """披露审计规则"""
-    rules: str
+    rules: str = Field(max_length=100_000)
 
 
 

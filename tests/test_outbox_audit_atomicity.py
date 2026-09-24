@@ -158,8 +158,12 @@ def test_commit_failure_rolls_back_data_event_and_audit(env, monkeypatch):
         conn = sqlite3.connect(db_path or models.CONFIG.DB_PATH)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
+        wrapped = _FailCommitConn(conn)
         try:
-            return fn(_FailCommitConn(conn))
+            result = fn(wrapped)
+            if write:
+                wrapped.commit()  # 对齐真门面 write=True 的提交点 → 注入失败在此引爆
+            return result
         finally:
             conn.close()  # 未 commit → close 即回滚
 

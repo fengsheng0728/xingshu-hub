@@ -26,6 +26,9 @@ HUB_PORT = 3062
 HUB_TOKEN = "test-token-p0-matrix"
 ALLOWLIST = {
     "/health", "/healthz", "/readyz", "/", "/showcase", "/knowledge", "/chat", "/report", "/wiki", "/team",
+    # CD-101 移交项：/metrics 免认证（Prometheus 抓取，与 /healthz 同组探针语义），
+    # 本集合是 routes.AUTH_ALLOWLIST_PATHS 的手工镜像，需同步登记
+    "/metrics",
     "/docs", "/openapi.json", "/static",
     # 函数内自校验 remote_api_key（team_members）——自认证端点豁免
     "/api/v1/team/proxy/disclose",

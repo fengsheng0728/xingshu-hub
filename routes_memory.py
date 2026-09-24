@@ -1,7 +1,9 @@
 """星枢 Sync Hub — 记忆池 API（Phase 2 拆分自 routes.py，端点路径与行为不变）"""
-import asyncio, json, os, sqlite3, time, uuid
+import asyncio, json, logging, os, sqlite3, time, uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
+
+logger = logging.getLogger("xingshu.routes_memory")
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, HTMLResponse
@@ -24,7 +26,7 @@ router = APIRouter()
 @router.post("/api/v1/memory/batch")
 async def api_batch_memory(
     agent_id: str,
-    operations: List[MemoryBatchOp],
+    operations: Annotated[List[MemoryBatchOp], PydanticField(max_length=200)],
     current_agent: str = Depends(get_current_agent),
 ):
     """H3: 批量记忆操作——一次 HTTP 读写多条"""
@@ -32,7 +34,7 @@ async def api_batch_memory(
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份操作 {agent_id}")
     results = []
-    for op in operations:
+    for idx, op in enumerate(operations):
         try:
             if op.action == "store":
                 entry = MemoryEntry(memory_key=op.memory_key or str(uuid.uuid4())[:8],
@@ -45,11 +47,23 @@ async def api_batch_memory(
                 r = await hub.delete_memory(op.memory_key, agent_id)
                 results.append({"ok": True, "deleted": op.memory_key})
             elif op.action == "search":
-                r = await hub.search_memory(agent_id, op.query or "", op.limit or 10)
+                # CD-091 修复：旧代码调不存在的 hub.search_memory(...)（恒走 except
+                # 静默吞成 ok:false）；真实方法是 hub.memory_search(req)，入参模型
+                # 与 REST /memory/search、WS memory_search 同款；op.limit 映射 top_k。
+                req = MemorySearchRequest(
+                    query=op.query or "",
+                    agent_id=agent_id,
+                    kind=[op.kind] if op.kind else ["fact", "todo"],
+                    top_k=op.limit or 10,
+                )
+                r = await hub.memory_search(req)
                 results.append({"ok": True, "results": r})
             else:
                 results.append({"ok": False, "error": f"Unknown action: {op.action}"})
         except Exception as e:
+            # per-item 失败不静默：记下条目索引 + 异常类型，其余条目照常执行
+            logger.warning("memory batch op #%d (%s) 失败: %s: %s",
+                           idx, op.action, type(e).__name__, e)
             results.append({"ok": False, "error": str(e)})
     return {"results": results}
 
@@ -185,11 +199,11 @@ async def api_semantic_search(
 
 
 class MemorySearchRequest(PydanticBase):
-    query: str
-    agent_id: str
+    query: str = PydanticField(max_length=4000)
+    agent_id: str = PydanticField(max_length=200)
     kind: list = PydanticField(default=["fact", "todo"])
-    top_k: int = 5
-    min_confidence: float = 0.6
+    top_k: int = PydanticField(default=5, ge=1, le=200)
+    min_confidence: float = PydanticField(default=0.6, ge=0.0, le=1.0)
 
 
 @router.post("/api/v1/memory/search")

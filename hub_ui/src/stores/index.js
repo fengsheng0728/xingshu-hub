@@ -68,17 +68,19 @@ export const useOpsStore = defineStore('ops', {
     healthFull: null,    // /health（降级状态 / 磁盘 / ChromaDB / 告警）
     bufferLive: null,    // /ws/buffer 实时帧（断线时由 refresh 的 HTTP 值兜底）
     bufferWs: '',        // open | connecting | degraded
+    deadLetters: null,   // CD-084 /api/v1/maintenance/dead-letters 死信队列
     error: '',
     lastFetch: 0,
   }),
   actions: {
     async refresh() {
       this.error = ''
-      const [quota, backup, health, buf] = await Promise.allSettled([
+      const [quota, backup, health, buf, dl] = await Promise.allSettled([
         api('/api/v1/agents/quota'),
         api('/api/v1/maintenance/backup-status'),
         fetch('/health').then((r) => r.json()),
         api('/api/v1/buffer/stats'),
+        api('/api/v1/maintenance/dead-letters', { query: { limit: 20 } }),
       ])
       if (quota.status === 'fulfilled') this.quotas = quota.value
       else this.error = quota.reason?.message || '配额加载失败'
@@ -86,7 +88,13 @@ export const useOpsStore = defineStore('ops', {
       if (health.status === 'fulfilled') this.healthFull = health.value
       // WS 断开时才用 HTTP 值覆盖缓冲显示（WS 活着以实时帧为准）
       if (buf.status === 'fulfilled' && this.bufferWs !== 'open') this.bufferLive = buf.value
+      if (dl.status === 'fulfilled') this.deadLetters = dl.value
       this.lastFetch = Date.now()
+    },
+    async retryDeadLetter(id) {
+      const r = await api(`/api/v1/maintenance/dead-letters/${id}/retry`, { method: 'POST', body: {} })
+      await this.refresh()
+      return r
     },
     setBufferWs(status) { this.bufferWs = status },
     setBufferLive(stats) { this.bufferLive = stats },

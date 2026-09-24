@@ -30,6 +30,7 @@
 | GET | `/api/v1/wiki/sync` | routes_wiki.py:264 | 统一格式 | `created/updated/skipped`（`wiki_sync.sync()` 返回值）；`background=1` 触发时计数不可得，如实记 `detail: unavailable: 后台异步执行…` |
 | GET | `/api/v1/wiki/inbox` | routes_wiki.py:309 | 统一格式 | `total` / `returned`（本次真实 SQL 查询结果） |
 | POST | `/api/v1/wiki/inbox/cleanup` | routes_wiki.py:345 | 统一格式 | `scanned` / `removed`（清理函数真实统计） |
+| POST | `/api/audit/anchor/verify` | routes_audit.py:560（CD-106） | 统一格式 | `tokens_checked` / `tokens_failed` / `tokens_unverified` / `anchors_checked` / `anchors_unverified` / `chain_local_valid` / `chain_tsa_valid`（本次 verify 返回值真实统计） |
 
 机器断言：`tests/test_ops_gate_matrix.py`
 - 结构断言：AST 扫描 `routes_*.py`，清单内每个 handler 判定路径上必须存在门调用

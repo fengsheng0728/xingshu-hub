@@ -30,6 +30,7 @@ import audit.memory_audit as memory_audit  # noqa: E402
 import db_facade  # noqa: E402
 import models  # noqa: E402
 import routes_memory  # noqa: E402
+from hub_core import SyncHub  # noqa: E402
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -55,11 +56,12 @@ def no_model(monkeypatch):
     """强制 chroma/模型故障：collection 置 None + _ensure_embedding_model 返回 None。"""
     hub = routes_memory.hub
 
-    async def _no_model():
+    async def _no_model(self):
         return None
 
     monkeypatch.setattr(hub, "_chroma_collection", None)
-    monkeypatch.setattr(hub, "_ensure_embedding_model", _no_model)
+    # CD-114：类级打桩（实例级会给单例留下永久实例属性，遮蔽后续类级 monkeypatch）
+    monkeypatch.setattr(SyncHub, "_ensure_embedding_model", _no_model)
     return hub
 
 
@@ -120,10 +122,11 @@ def test_k2_model_ok_but_row_without_embedding(env, monkeypatch):
     _insert_memory(env, "m1", "agent-a", "bath-cabinet", CONTENT)  # embedding=NULL
     hub = routes_memory.hub
 
-    async def _model():
+    async def _model(self):
         return _FakeModel()
 
-    monkeypatch.setattr(hub, "_ensure_embedding_model", _model)
+    # CD-114：类级打桩（实例级会给单例留下永久实例属性，遮蔽后续类级 monkeypatch）
+    monkeypatch.setattr(SyncHub, "_ensure_embedding_model", _model)
     result = _search(hub, query="浴室柜")
     ids = [r["memory_id"] for r in result["results"]]
     assert "m1" in ids, f"模型可用但行无 embedding 时旧行为恒空，实际 ids={ids}"

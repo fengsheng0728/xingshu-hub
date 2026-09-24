@@ -94,6 +94,45 @@ def run_startup_migration(db_path: str, repo_root: str = "",
     return {"action": "upgraded", "from": current, "to": after}
 
 
+# ============ CD-083/CD-099（2026-09-23）：启动横幅 + hub_token 启动硬门 ============
+
+def startup_banner(host: str, port: int, tls_enabled: bool, cfg=None) -> str:
+    """CD-083：启动配置横幅（单行）。敏感值打码——hub_token 只报 set/empty，绝不输出明文。"""
+    from models import CONFIG as _cfg, HUB_VERSION
+    cfg = cfg or _cfg
+    token = str(getattr(cfg, "HUB_TOKEN", "") or "").strip()
+    proxies = getattr(cfg, "TRUSTED_PROXIES", None) or []
+    return (
+        f"[banner] Sync Hub v{HUB_VERSION} "
+        f"listen={host}:{port} tls={'on' if tls_enabled else 'off'} "
+        f"auth_mode={getattr(cfg, 'AUTH_MODE', 'local')} "
+        f"registration={getattr(cfg, 'AUTH_REGISTRATION', 'guarded')} "
+        f"hub_token={'***' if token else '(empty)'} "
+        f"trusted_proxies={len(proxies)}"
+    )
+
+
+def _token_placeholder(token: str) -> bool:
+    """CD-099：空 token 或占位符（与 config.example.yaml 的 CHANGE_ME 占位口径一致）。"""
+    t = str(token or "").strip()
+    return (not t) or t.upper().startswith("CHANGE_ME")
+
+
+def check_startup_token_policy(host: str, token: str) -> str:
+    """CD-099（H-4 默认值收口）：hub_token 启动硬门判定。
+
+    返回 "ok" | "warn" | "fatal"：
+      - 空/占位 token + 非回环 host → "fatal"（调用方拒绝启动：0.0.0.0 裸奔 =
+        任何局域网成员可匿名 register/读业务端点）
+      - 空/占位 token + 回环 host   → "warn"（本机开发场景不阻断）
+      - 已配真实 token              → "ok"
+    NO_AUTH/测试态由调用方按 models._in_test_context() 跳过本判定。
+    """
+    if not _token_placeholder(token):
+        return "ok"
+    return "warn" if host in ("127.0.0.1", "localhost", "::1") else "fatal"
+
+
 if __name__ == "__main__":
     from routes import app
     import os, sys, yaml, uvicorn
@@ -103,7 +142,8 @@ if __name__ == "__main__":
     if not os.path.exists(config_path):
         os.makedirs(config_dir, exist_ok=True)
         default_config = {
-            "server": {"port": 3060, "host": "0.0.0.0"},
+            # CD-099：首跑生成的默认配置只绑回环（0.0.0.0 + 空 hub_token 会被启动硬门拒绝）
+            "server": {"port": 3060, "host": "127.0.0.1"},
             "auth": {"enabled": True},
             "database": {"path": "./sync_hub.db", "backup_enabled": True, "backup_interval_days": 7},
             "retention": {"memory_days": 180, "events_days": 60, "tasks_days": 365},
@@ -164,15 +204,22 @@ if __name__ == "__main__":
         except Exception as _exc:
             logger.debug("main silent-except(<module>): %s", _exc)
     
-    # OGA: guarded 受管注册必须有部署级 hub_token —— 中间件(TokenAuthMiddleware)靠
-    # CONFIG.HUB_TOKEN 强制 register/bootstrap 引导端点认证, guarded 但 hub_token
-    # 为空 = 匿名注册门失效(裸奔),拒绝启动。
-    from models import CONFIG
-    if CONFIG.AUTH_REGISTRATION == "guarded" and not str(CONFIG.HUB_TOKEN or "").strip():
-        print('[FATAL] auth.registration=guarded 但 auth.hub_token 为空 — 受管注册必须有部署级凭据。'
-              '请在 config.yaml 填入强随机 hub_token(示例: python -c "import secrets; print(secrets.token_urlsafe(32))")',
+    # CD-099（2026-09-23，H-4 默认值收口）：hub_token 启动硬门（取代原 OGA guarded-only 检查，
+    # 覆盖面从「guarded + 空 token」扩到「任何 registration 模式 + 空/占位 token + 非回环」——
+    # 0.0.0.0 裸奔时任何局域网成员可匿名访问，与 registration 模式无关）。
+    # NO_AUTH/测试态不拦（models._in_test_context 惯例：SYNC_HUB_NO_AUTH / PYTEST / DB_GUARD 标记）。
+    from models import CONFIG, _in_test_context
+    _tok_policy = check_startup_token_policy(host, CONFIG.HUB_TOKEN)
+    if _tok_policy == "fatal" and not _in_test_context():
+        print(f"[FATAL] auth.hub_token 为空或占位符（CHANGE_ME…）且监听 {host}（非回环）——拒绝启动。"
+              '请在 config.yaml 填入强随机 hub_token(示例: python -c "import secrets; print(secrets.token_urlsafe(32))")'
+              "，或把 server.host 改为 127.0.0.1（仅本机访问）。",
               file=sys.stderr)
         sys.exit(1)
+    if _tok_policy == "warn" and not _in_test_context():
+        print(f"[WARN] auth.hub_token 为空或占位符：当前监听 {host}（回环），允许启动；"
+              "对外开放前必须配置强随机 hub_token（受管注册 guarded 的引导认证也依赖它）。",
+              file=sys.stderr)
 
     # T17: 联邦防重放 nonce 持久化（独立 replay_nonce.db，与主库同目录）。
     # init_replay_store 内部已 try/except 兜底：建库失败降级纯内存打 warning，不阻断启动。
@@ -204,6 +251,8 @@ if __name__ == "__main__":
             sys.exit(1)
 
     log_level = "warning" if is_electron else "info"
+    # CD-083：启动配置横幅（敏感值打码，token 明文绝不输出）
+    print(startup_banner(host, port, _tls["enabled"], CONFIG))
     print(f"启动 Hub ({_scheme['http']}://{host}:{port}, electron={is_electron}, "
           f"tls={'on' if _tls['enabled'] else 'off'})")
     uvicorn.run(app, host=host, port=port, log_level=log_level, **_tls_kwargs)

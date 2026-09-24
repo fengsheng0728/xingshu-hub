@@ -19,6 +19,7 @@ logger = logging.getLogger("federation")
 AGENTS_SNAPSHOT_EXCLUDE = {
     "api_key", "api_key_created_at", "api_key_expires_at",
     "api_key_prev", "api_key_prev_expires_at", "api_key_ip_whitelist",
+    "api_key_hash", "api_key_prev_hash",
     "last_used_at",
 }
 
@@ -70,16 +71,25 @@ def import_snapshot(db_path: str, kind: str, rows: list) -> dict:
         info = c.fetchall()
         pk_cols = [row[1] for row in info if row[5] == 1]
         pk = pk_cols[0] if pk_cols else info[0][1]
+        # 列名白名单：远端 rows 的列必须与目标表 PRAGMA table_info 列集取交集，
+        # 未知列整行拒绝（防伪造列名注入），列名一律双引号包裹拼接
+        valid_cols = {row[1] for row in info}
         imported = 0
         for row in rows:
             if pk not in row:
                 continue
             cols = list(row.keys())
+            unknown = [col for col in cols if col not in valid_cols]
+            if unknown:
+                logger.warning(
+                    "import_snapshot: 拒绝含未知列的行 kind=%s pk=%s unknown_cols=%s",
+                    kind, row.get(pk), unknown)
+                continue
             placeholders = ",".join("?" for _ in cols)
-            colnames = ",".join(cols)
-            updates = ",".join(f"{col}=excluded.{col}" for col in cols if col != pk)
-            sql = (f"INSERT INTO {table} ({colnames}) VALUES ({placeholders}) "
-                   f"ON CONFLICT({pk}) DO UPDATE SET {updates}")
+            colnames = ",".join(f'"{col}"' for col in cols)
+            updates = ",".join(f'"{col}"=excluded."{col}"' for col in cols if col != pk)
+            sql = (f'INSERT INTO "{table}" ({colnames}) VALUES ({placeholders}) '
+                   f'ON CONFLICT("{pk}") DO UPDATE SET {updates}')
             c.execute(sql, [row[col] for col in cols])
             imported += 1
         conn.commit()

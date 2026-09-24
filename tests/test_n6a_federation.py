@@ -157,6 +157,43 @@ def test_import_inserts_new():
     shutil.rmtree(tmp, ignore_errors=True)
 
 
+# ============ 2b. 导入列名白名单（授权门禁修复轮） ============
+
+def test_import_rejects_unknown_columns():
+    """远端 rows 含目标表 PRAGMA table_info 之外的列 → 整行拒绝（防伪造列名注入）。"""
+    tmp = tempfile.mkdtemp(prefix="n6a-")
+    db = os.path.join(tmp, "t.db")
+    _make_db(db, [AGENTS_TABLE])
+
+    rows = [{"agent_id": "a9", "agent_name": "x", "role": "worker",
+             "status": "online", 'evil"; DROP TABLE agents;--': "1"}]
+    r = import_snapshot(db, "agents", rows)
+    assert r["status"] == "ok" and r["imported"] == 0, f"未知列行应被拒: {r}"
+    conn = sqlite3.connect(db)
+    assert conn.execute("SELECT count(*) FROM agents").fetchone()[0] == 0
+    conn.close()
+    os.remove(db)
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_import_valid_columns_still_quoted():
+    """合法列名正常导入（双引号包裹不影响语义）。"""
+    tmp = tempfile.mkdtemp(prefix="n6a-")
+    db = os.path.join(tmp, "t.db")
+    _make_db(db, [AGENTS_TABLE])
+    rows = [{"agent_id": "a8", "agent_name": "合法", "role": "worker", "status": "online"}]
+    r = import_snapshot(db, "agents", rows)
+    assert r["status"] == "ok" and r["imported"] == 1
+    conn = sqlite3.connect(db)
+    row = conn.execute("SELECT agent_name FROM agents WHERE agent_id='a8'").fetchone()
+    conn.close()
+    assert row == ("合法",)
+    os.remove(db)
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ============ 3. 端到端（双 Hub 真实拉取） ============
 
 def test_e2e_pull_from_peer():
@@ -206,6 +243,23 @@ def test_e2e_pull_from_peer():
             reg = json.loads(r.read().decode())
         api_key = reg.get("api_key", "")
 
+        # 安全收编（授权门禁修复轮）：快照端点仅 manager/orchestrator 可拉。
+        # 注册默认 role=worker → 先验证 worker 被 403 拒绝，再提升为 manager 验证放行。
+        req = urllib.request.Request(
+            "http://127.0.0.1:3071/api/v1/federation/snapshot/agents",
+            headers={"Authorization": f"Bearer {api_key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=8) as r:
+                snap = json.loads(r.read().decode())
+            raise AssertionError(f"worker 不应能拉快照: {snap}")
+        except urllib.error.HTTPError as e:
+            assert e.code == 403, f"worker 拉快照应 403，实得 {e.code}"
+
+        conn = sqlite3.connect(db_main)
+        conn.execute("UPDATE agents SET role='manager' WHERE agent_id='fed-a'")
+        conn.commit()
+        conn.close()
+
         # 备 Hub 直接调快照端点拉取（模拟 pull_from_peer 的网络路径）
         req = urllib.request.Request(
             "http://127.0.0.1:3071/api/v1/federation/snapshot/agents",
@@ -229,5 +283,137 @@ def test_e2e_pull_from_peer():
             hub.kill()
         if hub2:
             hub2.kill()
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ============ 4. 快照端点双通道认证（联邦快照链断裂修复轮） ============
+#
+# 背景：pair exchange 落库的 remote_api_key 是 secrets.token_urlsafe(32) 随机串，
+# 只写 team_members 表，从不注册进 agents/agent_keys——快照端点走标准认证
+# （get_current_agent）必然 401，再叠加 manager/orchestrator 角色门 → 双门永拒，
+# 合法跨 Hub 快照拉取从未工作过。
+# 修复口径（对齐 /team/proxy/disclose 既成模式）：路由层认证豁免
+# （routes.AUTH_ALLOWLIST_PREFIXES 前缀），端点函数内双通道自认证——
+# (a) 标准凭据：hub_token 或 manager/orchestrator → 放行；
+# (b) 配对凭据：team_members.remote_api_key 命中且 revoked_at IS NULL → 放行；
+# 两路皆败 → 401（无效凭据）/403（身份有效但无权限），不泄露配对存在性。
+
+
+def _start_hub(tmp, port, db_name):
+    """起一个独立测试 Hub（临时 config 指向临时 DB，鉴权开启）。"""
+    cfg_dir = os.path.join(tmp, f"cfg-{port}")
+    os.makedirs(cfg_dir, exist_ok=True)
+    with open(os.path.join(cfg_dir, "config.yaml"), "w", encoding="utf-8") as f:
+        f.write(
+            f"server:\n  port: {port}\n  host: 127.0.0.1\n"
+            f"database:\n  path: {os.path.join(tmp, db_name).replace(chr(92), '/')}\n"
+            f"  backup_enabled: False\n"
+        )
+    env = dict(os.environ)
+    env["SYNC_HUB_CONFIG_DIR"] = cfg_dir
+    env.pop("SYNC_HUB_NO_AUTH", None)  # 确保鉴权开启——本组用例验的就是认证通道
+    return subprocess.Popen(
+        [sys.executable, "main.py"], cwd=str(_ROOT), env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    ), os.path.join(tmp, db_name)
+
+
+def _wait_health(port, timeout=45):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=2):
+                return True
+        except Exception:
+            time.sleep(0.5)
+    return False
+
+
+def _get_snapshot(port, kind, token):
+    """GET 快照端点，返回 (http_status, body_or_None)。"""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/api/v1/federation/snapshot/{kind}",
+        headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+
+def _insert_team_member(db, api_key, revoked=False, remote_hub_id="hub-peer"):
+    """直写一条 team_members 配对记录（模拟 pair exchange 落库）。"""
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "INSERT INTO team_members (local_agent_id, remote_hub_id, remote_hub_url,"
+        " remote_agent_id, remote_api_key, paired_at, key_expires_at, revoked_at)"
+        " VALUES ('local-a', ?, 'http://192.168.1.2:3060', 'remote-b', ?,"
+        " '2026-01-01T00:00:00+00:00', '2027-01-01T00:00:00+00:00', ?)",
+        (remote_hub_id, api_key, "2026-06-01T00:00:00+00:00" if revoked else None))
+    conn.commit()
+    conn.close()
+
+
+def test_snapshot_path_in_auth_allowlist_prefixes():
+    """快照端点已登记认证豁免前缀（端点内双通道自认证兜底）。"""
+    import routes
+    assert "/api/v1/federation/snapshot" in routes.AUTH_ALLOWLIST_PREFIXES
+    # /federation/pull 是本地触发动作，保持全局认证 + 角色门，不得进豁免
+    assert "/api/v1/federation/pull" not in routes.AUTH_ALLOWLIST_PATHS
+    assert not any("/api/v1/federation/pull".startswith(p)
+                   for p in routes.AUTH_ALLOWLIST_PREFIXES)
+
+
+def test_snapshot_pairing_credential_dual_channel():
+    """配对凭据可拉快照；未配对随机串 401；revoked 成员 401/403；manager key 仍通。"""
+    tmp = tempfile.mkdtemp(prefix="n6a-dual-")
+    port = 3073
+    proc = None
+    PAIR_KEY = "pair-active-" + "a" * 32
+    REVOKED_KEY = "pair-revoked-" + "b" * 31
+    try:
+        proc, db = _start_hub(tmp, port, "hub.db")
+        assert _wait_health(port), "Hub 未就绪"
+
+        _insert_team_member(db, PAIR_KEY, revoked=False, remote_hub_id="hub-peer-a")
+        _insert_team_member(db, REVOKED_KEY, revoked=True, remote_hub_id="hub-peer-b")
+
+        # 1. 配对凭据（team_members.remote_api_key，未撤销）→ 放行
+        code, body = _get_snapshot(port, "agents", PAIR_KEY)
+        assert code == 200, f"配对凭据拉快照应 200，实得 {code}"
+        assert body["status"] == "ok"
+        assert all("api_key" not in row for row in body["rows"]), "快照泄露 api_key!"
+
+        # 2. 未配对随机串 → 401
+        code, _ = _get_snapshot(port, "agents", "unpaired-" + "x" * 32)
+        assert code == 401, f"未配对随机串应 401，实得 {code}"
+
+        # 3. revoked 配对成员 → 401/403（不泄露存在性即可）
+        code, _ = _get_snapshot(port, "agents", REVOKED_KEY)
+        assert code in (401, 403), f"revoked 成员应 401/403，实得 {code}"
+
+        # 4. manager 标准凭据仍通（角色门通道不回归）
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/agents/register",
+            data=json.dumps({"agent_id": "fed-mgr", "agent_name": "主管"}).encode(),
+            headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=8) as r:
+            mgr_key = json.loads(r.read().decode())["api_key"]
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE agents SET role='manager' WHERE agent_id='fed-mgr'")
+        conn.commit()
+        conn.close()
+        code, body = _get_snapshot(port, "agents", mgr_key)
+        assert code == 200 and body["status"] == "ok", f"manager 拉快照应通，实得 {code}"
+
+        # 5. 无 token → 401（豁免≠匿名放行，端点自认证兜底）
+        code, _ = _get_snapshot(port, "agents", "")
+        assert code == 401, f"无 token 应 401，实得 {code}"
+    finally:
+        if proc:
+            proc.kill()
         import shutil
         shutil.rmtree(tmp, ignore_errors=True)

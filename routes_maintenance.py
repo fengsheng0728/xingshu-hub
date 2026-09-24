@@ -3,10 +3,12 @@ import logging
 logger = logging.getLogger("xingshu.routes_maintenance")
 
 import asyncio
+import re
+import sqlite3
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
-from db import get_lan_ips, check_windows_firewall
+from db import get_lan_ips, check_windows_firewall, record_dead_letter
 from deps import CONFIG
 from hub_core import hub
 from routes_common import get_current_agent, require_ops_privilege, log_ops_trigger
@@ -28,7 +30,15 @@ async def api_force_cleanup(
     """手动触发数据清理（CD-061：补 Depends 认证 + 重运维统一门 + 触发审计）"""
     await require_ops_privilege(request, "/api/v1/maintenance/cleanup", current_agent)
     before = await hub._db_stats()
-    result = await hub.force_cleanup()
+    try:
+        result = await hub.force_cleanup()
+    except Exception as exc:
+        # CD-084：清理失败此前只有 500/日志，落死信账本（不吞异常，仍 500）
+        await asyncio.to_thread(
+            record_dead_letter, "maintenance_cleanup", "cleanup",
+            {"before": before, "requester": current_agent},
+            f"{type(exc).__name__}: {exc}")
+        raise
     counts = {}
     for table in ("memory_pool", "events", "tasks"):
         after = result.get(table) if isinstance(result, dict) else None
@@ -73,9 +83,16 @@ async def api_shadow_reconcile(
     """T31: 手动触发影子档案对账（孤儿/跨天重复归档）。走 CD-061 运维门 + ops_trigger 审计。"""
     await require_ops_privilege(request, "/api/v1/maintenance/shadow-reconcile", current_agent)
     from hub_mixins.shadow.reconcile import reconcile_shadow_archives
-    stats = await asyncio.to_thread(
-        reconcile_shadow_archives, hub.data_trunk,
-        db_path=getattr(hub, "_audit_db_path", None) or getattr(CONFIG, "DB_PATH", None))
+    try:
+        stats = await asyncio.to_thread(
+            reconcile_shadow_archives, hub.data_trunk,
+            db_path=getattr(hub, "_audit_db_path", None) or getattr(CONFIG, "DB_PATH", None))
+    except Exception as exc:
+        # CD-084：对账失败落死信账本（不吞异常，仍 500）
+        await asyncio.to_thread(
+            record_dead_letter, "maintenance_shadow_reconcile", "reconcile",
+            {"requester": current_agent}, f"{type(exc).__name__}: {exc}")
+        raise
     await log_ops_trigger("/api/v1/maintenance/shadow-reconcile", current_agent, stats)
     return stats
 
@@ -113,7 +130,77 @@ async def api_backup_status():
     return {
         "enabled": backup_cfg.get("backup_enabled", True),
         "keep_days": backup_cfg.get("backup_interval_days", 7),
-        "dir": backup_dir,
+        "dir": os.path.basename(os.path.normpath(backup_dir)),  # 只出目录名，不泄露绝对路径
         "count": len(files),
         "latest": files[0] if files else None,
     }
+
+
+# ============ CD-084：死信队列（dead_letters 表的运维面） ============
+
+@router.get("/api/v1/maintenance/dead-letters")
+async def api_dead_letters(limit: int = 50, offset: int = 0, source: str = ""):
+    """CD-084 死信列表：分页（limit 上限 500，对齐 CD-043 收件箱口径）+ 按 source 过滤。
+
+    返回 total / pending（retried=0 未处理数）/ items（id 倒序）。
+    只读端点，与其余 maintenance GET 一致走全局中间件认证。
+    """
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    where = "WHERE source = ?" if source else ""
+    params = (source,) if source else ()
+    conn = hub._db()
+    conn.row_factory = sqlite3.Row
+    try:
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM dead_letters {where}", params).fetchone()[0]
+        pending = conn.execute(
+            f"SELECT COUNT(*) FROM dead_letters {where}"
+            f" {'AND' if source else 'WHERE'} retried = 0", params).fetchone()[0]
+        rows = conn.execute(
+            f"SELECT * FROM dead_letters {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params + (limit, offset)).fetchall()
+    finally:
+        conn.close()
+    return {"total": total, "pending": pending, "limit": limit, "offset": offset,
+            "items": [dict(r) for r in rows]}
+
+
+@router.post("/api/v1/maintenance/dead-letters/{letter_id}/retry")
+async def api_dead_letter_retry(
+    letter_id: int,
+    request: Request,
+    current_agent: str = Depends(get_current_agent),
+):
+    """CD-084 死信重试（重新入队或标记，按 source 的可行最小语义）：
+    - automation_job:<id>：重置 consecutive_failures 并重新启用该自动化任务
+      （对齐 routes_automation toggle 的 _reset_fail_count 既有语义）；
+    - 其余 source：无安全重放语义的不妄动，只标记 retried。
+    走 CD-061 重运维统一门 + ops_trigger 审计。
+    """
+    await require_ops_privilege(
+        request, "/api/v1/maintenance/dead-letters/retry", current_agent)
+    conn = hub._db()
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute(
+            "SELECT * FROM dead_letters WHERE id = ?", (letter_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="dead letter not found")
+        src = row["source"] or ""
+        action = "marked"
+        m = re.fullmatch(r"automation_job:(\d+)", src)
+        if m:
+            conn.execute(
+                "UPDATE automation_jobs SET enabled=1, consecutive_failures=0,"
+                " updated_at=datetime('now') WHERE id=?", (int(m.group(1)),))
+            action = "automation_job_reenabled"
+        conn.execute(
+            "UPDATE dead_letters SET retried=1, retried_at=datetime('now')"
+            " WHERE id=?", (letter_id,))
+        conn.commit()
+        result = {"ok": True, "id": letter_id, "source": src, "action": action}
+    finally:
+        conn.close()
+    await log_ops_trigger("/api/v1/maintenance/dead-letters/retry", current_agent, result)
+    return result

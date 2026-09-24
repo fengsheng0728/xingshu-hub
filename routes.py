@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 import uuid
 from models import CONFIG, HUB_VERSION
 from hub_core import hub
-from logfmt import set_trace_id
+from logfmt import set_trace_id, set_request_id, sanitize_request_id
 
 # Phase 2：共享认证依赖已拆分至 routes_common（此处 re-export 保持外部引用兼容：
 # `from routes import NO_AUTH/_auth_provider/_version_ge/...` 语义不变。
@@ -32,25 +32,52 @@ from routes_shared import _ws, _shared_watchers, _broadcast_shared_update  # noq
 from routes_gateway import set_mcp_principal
 
 
+# ============ CD-080 可信代理 IP 口径：已下沉至 routes_common（CD-107，2026-09-24）============
+# 全仓唯一实现：routes_common._scope_client_ip（本文件经 import re-export，
+# 调用点形态不变）。禁止在此重建本地 def——两套口径并存即为 CD-107 缺陷本体。
+
+
+# ============ CD-083（2026-09-23）：X-Request-ID 请求级关联 ============
+def _wrap_send_request_id(send, rid: str):
+    """包装 ASGI send：在 http.response.start 上追加 x-request-id 响应头（回显/下发）。"""
+    async def _send(message):
+        if message.get("type") == "http.response.start":
+            headers = list(message.get("headers") or [])
+            headers.append((b"x-request-id", rid.encode("latin-1")))
+            message = dict(message, headers=headers)
+        await send(message)
+    return _send
+
+
+async def _bg_task(name: str, coro):
+    """CD-083：后台任务入口生成内部 request id（自动化 tick/备份/清理等循环的日志可串联）。"""
+    set_request_id(f"bg-{name}-{uuid.uuid4().hex[:12]}")
+    return await coro
+
+
 # ============ FastAPI 应用 ============
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await hub._restore_agents()
-    asyncio.create_task(hub._cleanup_loop())
-    asyncio.create_task(hub._keepalive_ping())
+    # P0 S4：启动时从 events 表回填未过期的 WS 熔断封禁（防重启清零）
+    from routes_ws import restore_ws_bans
+    await restore_ws_bans()
+    # CD-083：后台任务一律经 _bg_task 包装——入口生成内部 request id 进日志上下文
+    asyncio.create_task(_bg_task("cleanup-loop", hub._cleanup_loop()))
+    asyncio.create_task(_bg_task("keepalive", hub._keepalive_ping()))
     await hub.start_write_buffer()  # 写入缓冲 + Wiki 自动同步
     # 启动时执行一次数据库备份
-    asyncio.create_task(hub._run_backup())
-    asyncio.create_task(hub._run_cleanup())
-    asyncio.create_task(automation_scheduler(hub))
+    asyncio.create_task(_bg_task("backup", hub._run_backup()))
+    asyncio.create_task(_bg_task("cleanup", hub._run_cleanup()))
+    asyncio.create_task(_bg_task("automation-tick", automation_scheduler(hub)))
     # XS-004：审计锚定外发（启动即推一次 + 按 AUDIT_ANCHOR_INTERVAL 周期推送；
     # 默认空 URL 列表 = 休眠，仅写本地快照）
     from routes_audit import anchor_export_loop
-    asyncio.create_task(anchor_export_loop())
+    asyncio.create_task(_bg_task("anchor-export", anchor_export_loop()))
     # 集成层（§七）：拉取调度循环
     from integrations.registry import integration_scheduler
     from routes_integrations import registry as _integrations_registry
-    asyncio.create_task(integration_scheduler(hub, _integrations_registry))
+    asyncio.create_task(_bg_task("integrations", integration_scheduler(hub, _integrations_registry)))
     # 共享工作区
     from shared_workspace import SharedWorkspace
     import shared_workspace
@@ -114,15 +141,24 @@ import json as _json
 # - hub_token 读自 config.yaml auth.hub_token（CONFIG.HUB_TOKEN）
 # - NO_AUTH=1（开发/测试）时全放行
 # - /static、/docs 等挂载/文档路径放行；/mcp 已移出豁免（T0-3，CD-013），走统一认证
-AUTH_ALLOWLIST_PREFIXES = ("/static", "/assets", "/legacy", "/docs", "/openapi.json")
-# /health 存活探针；6 页面壳（T0-3 无 token 可打开输入界面，页面内 fetch 才鉴权）；
+# federation/snapshot 前缀豁免（联邦快照链断裂修复）：端点函数内双通道自认证——
+# 标准凭据（hub_token/manager/orchestrator）或 team_members.remote_api_key 配对凭据，
+# 对齐 team/proxy/disclose 的「豁免 + 函数内自校验」既成模式；/federation/pull 不豁免
+# CD-110：wiki import/export 与 /api/v1/federation/snapshot 同型——路由层豁免的
+# 前提是端点函数内自认证（缺一不可）；豁免 ≠ 公开（无有效凭据仍 401/403）
+AUTH_ALLOWLIST_PREFIXES = ("/static", "/assets", "/legacy", "/docs", "/openapi.json",
+                           "/api/v1/federation/snapshot",
+                           "/api/v1/wiki/import",
+                           "/api/v1/wiki/export")
+# /health 存活探针；/metrics（CD-101 移交项：Prometheus 抓取免认证，与 /healthz 同组探针语义，
+# 端点本体在 routes_server.py）；6 页面壳（T0-3 无 token 可打开输入界面，页面内 fetch 才鉴权）；
 # register/bootstrap 为引导端点（只发新 api_key，不读业务数据）——无 key 死锁豁免，
 # 配 hub_token 后注册请求带 token 同样通过（D2 防的是业务端点泄露）；
 # team/proxy/disclose 函数内自校验 remote_api_key（team_members 表）——自认证端点豁免，
 # P2 升级为 AES-GCM 加密信道时在其内部叠加；
 # team/pair/exchange 配对握手端点——用 6 位配对码自认证（跨 Hub 调用，无本地 api_key）
 AUTH_ALLOWLIST_PATHS = {
-    "/health", "/healthz", "/readyz", "/", "/showcase", "/knowledge", "/chat", "/report", "/wiki", "/team",
+    "/health", "/healthz", "/readyz", "/metrics", "/", "/showcase", "/knowledge", "/chat", "/report", "/wiki", "/team",
     "/api/v1/agents/register", "/api/v1/agents/bootstrap",
     "/api/v1/team/proxy/disclose",
     "/api/v1/team/pair/exchange",
@@ -130,7 +166,23 @@ AUTH_ALLOWLIST_PATHS = {
 
 # T11：认证豁免但参与限速的 allowlist 路径——pair/exchange 用 6 位码自认证，
 # 免限速会被爆破（100 万码空间），必须走每 IP 限速；认证豁免（下方 allowlist 放行）保持原样
-RATE_LIMITED_ALLOWLIST = ("/api/v1/team/pair/exchange",)
+RATE_LIMITED_ALLOWLIST = (
+    "/api/v1/team/pair/exchange",
+    # CD-117（2026-09-24）：免认证的**联邦端点**同样参与限速 —— 它们靠端点函数内
+    # 双通道自认证（配对凭据），匿名方可高频打、每次落一行 _log_deny ⇒ 拒绝路径写入放大。
+    # 限速与认证是两件事，豁免认证 ≠ 豁免限速。
+    # 新增 /api/v1/federation/snapshot 是口径一致性决定（同性质、非本轮引入；
+    # 验收方裁决一并纳入，避免同一件事分两次做）。
+    "/api/v1/wiki/import",
+    "/api/v1/wiki/export",
+    "/api/v1/federation/snapshot",
+)
+
+# CD-101（2026-09-23）：请求体大小上限（Content-Length 快路径预检，超限 413）。
+# 默认档 CONFIG.MAX_BODY_BYTES（2MB，config.yaml server.max_body_bytes 可调）；
+# 大文本端点按路径放行到 CONFIG.MAX_BODY_BYTES_LARGE（8MB 档，
+# config.yaml server.max_body_bytes_large 可调）。
+BODY_LIMIT_LARGE_PATHS = ("/api/v1/hub-agent/chat", "/api/v1/wiki/import")
 
 
 def _endpoint_allowed(path: str, allowed: List[str]) -> bool:
@@ -204,12 +256,38 @@ class TokenAuthMiddleware:
             tid = uuid.uuid4().hex[:16]
         set_trace_id(tid)
 
+        # CD-083：X-Request-ID 请求级关联——入站有则沿用（白名单清洗防日志注入），
+        # 无则 uuid4 hex；包装 send 写回响应头；塞进日志上下文（logfmt request_id）。
+        rid = ""
+        for name, value in scope.get("headers", []):
+            if name == b"x-request-id":
+                rid = value.decode("latin-1", "replace")
+                break
+        rid = sanitize_request_id(rid) or uuid.uuid4().hex
+        set_request_id(rid)
+        send = _wrap_send_request_id(send, rid)
+
+        # CD-101：请求体上限预检（快路径按 Content-Length；无头/非法头不拦，
+        # 由下游解析兜底）。资源护栏与认证无关，故放在 NO_AUTH 短路之前。
+        body_limit = (CONFIG.MAX_BODY_BYTES_LARGE if path in BODY_LIMIT_LARGE_PATHS
+                      else CONFIG.MAX_BODY_BYTES)
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    if int(value.decode("latin-1", "replace")) > body_limit:
+                        return await _send_413(send, body_limit)
+                except ValueError:
+                    pass
+                break
+
         if NO_AUTH:
             return await self.app(scope, receive, send)
 
         # P0 S4：每 IP 限速（健康/静态/文档路径豁免——探针与资源加载不受限；
         # T11：RATE_LIMITED_ALLOWLIST 中的路径虽免认证但参与限速）
-        if CONFIG.RATE_LIMIT_PER_IP > 0 and (path in RATE_LIMITED_ALLOWLIST
+        # CD-117 验收裁决：改前缀匹配 —— 认证豁免用 startswith、限速参与也要同口径，
+        # 否则同一前缀两种语义（snapshot 的子路径就漏了限速）。精确路径行为不变。
+        if CONFIG.RATE_LIMIT_PER_IP > 0 and (path.startswith(RATE_LIMITED_ALLOWLIST)
                                              or not (path in AUTH_ALLOWLIST_PATHS
                                                      or path.startswith(AUTH_ALLOWLIST_PREFIXES))):
             if not await _rate_limit_ok(scope, path):
@@ -270,6 +348,10 @@ async def _rate_limit_ok(scope, path: str) -> bool:
     window = 1.0
     now = time.time()
     async with _RATE_LOCK:
+        # 键数水位：字典以 IP 为键、仅在键再次出现时清理——超水位整体清过期项
+        if len(_rate_hits) > 10000:
+            for _k in [k for k, v in _rate_hits.items() if not v or now - v[-1] >= window]:
+                del _rate_hits[_k]
         hits = [t for t in _rate_hits.get(ip, []) if now - t < window]
         if len(hits) >= limit:
             _rate_hits[ip] = hits
@@ -305,6 +387,11 @@ async def _agent_quota_ok(scope, agent_id: str, path: str) -> bool:
     qps_limit, mode, window_sec, burst = row
     now = time.time()
     async with _AGENT_QUOTA_LOCK:
+        # 键数水位：字典以 agent_id 为键、仅在键再次出现时清理——超水位整体清过期项。
+        # 各 agent 窗口不同，取保守过期阈值 60s（活跃 agent 命中远密于此）。
+        if len(_agent_quota_hits) > 10000:
+            for _k in [k for k, v in _agent_quota_hits.items() if not v or now - v[-1] >= 60]:
+                del _agent_quota_hits[_k]
         hits = [t for t in _agent_quota_hits.get(agent_id, []) if now - t < (window_sec or 1.0)]
         # 阈值 = 每秒限额 × 窗口；burst 为超限后审计前的容忍增量
         limit = max(1, int((qps_limit or 50) * (window_sec or 1.0)))
@@ -365,6 +452,19 @@ def _extract_bearer(scope) -> str:
                 return raw[7:]
             break
     return ""
+
+
+async def _send_413(send, limit: int):
+    """CD-101：请求体超限 — 413 Payload Too Large。"""
+    body = _json.dumps(
+        {"detail": f"Payload Too Large: 请求体超过上限 {limit} 字节"}
+    ).encode("utf-8")
+    await send({
+        "type": "http.response.start",
+        "status": 413,
+        "headers": [(b"content-type", b"application/json; charset=utf-8")],
+    })
+    await send({"type": "http.response.body", "body": body})
 
 
 async def _send_403(send, detail: str = "Forbidden"):
@@ -578,6 +678,8 @@ app.include_router(_gateway_router)
 app.include_router(_pages_router)
 app.include_router(_ws_router)
 app.include_router(_dashboard_router)
+from routes_activity import router as _activity_router
+app.include_router(_activity_router)
 
 
 # P0: 部署级 token 鉴权中间件 — 挂在最外层，所有 HTTP 请求先过门卫

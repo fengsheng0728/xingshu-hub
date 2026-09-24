@@ -1,10 +1,10 @@
 """星枢 Sync Hub — 通知 / 私聊 API（Phase 2 拆分自 routes.py，端点路径与行为不变）"""
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from hub_core import hub
-from routes_common import NO_AUTH, get_current_agent
+from routes_common import NO_AUTH, get_current_agent, require_role
 
 router = APIRouter()
 
@@ -58,7 +58,7 @@ async def api_dm_list(agent_id: str, current_agent: str = Depends(get_current_ag
     conn = hub._db()
     try:
         rows = conn.execute(
-            "SELECT * FROM messages WHERE from_agent_id = ? OR to_agent_id = ? ORDER BY created_at ASC",
+            "SELECT * FROM messages WHERE from_agent_id = ? OR to_agent_id = ? ORDER BY created_at ASC LIMIT 500",
             (agent_id, agent_id)).fetchall()
     finally:
         conn.close()
@@ -103,6 +103,7 @@ async def api_mark_all_read(
 
 @router.post("/api/v1/notifications/create")
 async def api_create_notification(
+    request: Request,
     agent_id: str,
     type: str = "info",
     title: str = "",
@@ -116,7 +117,19 @@ async def api_create_notification(
     """创建通知并 WebSocket 推送。source 标记触发自动化。
 
     Query params: agent_id, type, title, body, related_task_id, related_agent_id, source, artifact_path
+
+    修复轮归属门：agent_id 默认只能是自己；代他人发通知需 manager/orchestrator
+    角色（或 hub_token，require_role 内判）。title/body 长度上限 200/2000，超限 400。
     """
+    if agent_id != current_agent:
+        require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                     roles=("manager", "orchestrator",),
+                     detail="仅主管/店长可代他人创建通知",
+                     principal=getattr(request, "scope", {}).get("principal"))
+    if len(title or "") > 200:
+        raise HTTPException(status_code=400, detail="title 超长（上限 200 字符）")
+    if len(body or "") > 2000:
+        raise HTTPException(status_code=400, detail="body 超长（上限 2000 字符）")
     return await hub.create_notification(
         agent_id=agent_id, type=type, title=title, body=body,
         related_task_id=related_task_id, related_agent_id=related_agent_id,

@@ -218,3 +218,74 @@ def test_no_pending_db_path_degrades(tmp_path):
         assert w.dt.branch_repo().read_at(f"vault/memory/{_DATE}/n1.md") is not None
     finally:
         w.stop()
+
+
+# ⑧ 数据层修复轮：busy_timeout 口径对齐 outbox.py（PRAGMA busy_timeout = 5000）
+def test_pend_conn_has_busy_timeout(tmp_path):
+    """pending 共享连接必须带 busy_timeout=5000（对齐 outbox 消费者口径）。"""
+    w = _writer(tmp_path)
+    conn = w._pend_conn()
+    assert conn.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+
+
+def test_pending_insert_waits_out_writer_lock(tmp_path):
+    """先红：无 busy_timeout 时并发写锁下 INSERT 瞬时 database is locked 降级
+    （_pending_insert 返回 None，本条失去崩溃保护）。"""
+    import threading
+    w = _writer(tmp_path)
+    w._pend_conn()  # 建表
+    db = str(tmp_path / "pending.db")
+    blocker = sqlite3.connect(db, check_same_thread=False)
+    blocker.execute("BEGIN IMMEDIATE")  # RESERVED 锁：挡写不挡读
+
+    def _release():
+        time.sleep(0.3)
+        blocker.commit()
+        blocker.close()
+
+    t = threading.Thread(target=_release)
+    t.start()
+    try:
+        pid = w._pending_insert("memory", {"memory_id": "bt1"})
+        assert pid is not None, "持锁 0.3s 应等待成功，而非瞬时 locked 降级"
+    finally:
+        t.join()
+
+
+def test_reconcile_waits_out_writer_lock(tmp_path):
+    """reconcile 查库在短暂写锁下应等待成功（busy_timeout），不误判/报错。"""
+    import threading
+    from hub_mixins.shadow.reconcile import reconcile_shadow_archives
+    dt = _dt(tmp_path)
+    # 造一个 vault 档案 + 主库有对应 memory_id（否则会被当孤儿归档）
+    br = dt.branch_repo("default")
+    mdir = os.path.join(br.root, "vault", "memory", _DATE)
+    os.makedirs(mdir, exist_ok=True)
+    fpath = os.path.join(mdir, "rc1.md")
+    with open(fpath, "w", encoding="utf-8") as f:
+        f.write("x")
+    main_db = str(tmp_path / "main.db")
+    conn = sqlite3.connect(main_db)
+    conn.execute("CREATE TABLE memory_pool (memory_id TEXT PRIMARY KEY)")
+    conn.execute("INSERT INTO memory_pool VALUES ('rc1')")
+    conn.commit()
+    conn.close()
+
+    blocker = sqlite3.connect(main_db, check_same_thread=False)
+    blocker.execute("BEGIN EXCLUSIVE")  # EXCLUSIVE：读写都挡
+
+    def _release():
+        time.sleep(0.3)
+        blocker.commit()
+        blocker.close()
+
+    t = threading.Thread(target=_release)
+    t.start()
+    try:
+        stats = reconcile_shadow_archives(dt, db_path=main_db)
+    finally:
+        t.join()
+    assert stats["errors"] == 0, \
+        f"短暂写锁应被 busy_timeout 吸收，实际 errors={stats['errors']}"
+    assert os.path.exists(fpath), "主库存在该记忆，档案不得被误判为孤儿归档"
+    assert stats["orphan_archived"] == 0

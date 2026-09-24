@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Any
 import numpy as np
 
 from deps import DisclosureLevel, MemoryEntry, SemanticSearchRequest, logger
+from disclosure import _SCOPE_UNSET  # CD-105：fail-closed 哨兵（与 disclosure 共用，不另造）
 from envelope import envelope_ping, serialize
 from transport_audit import log_ping_pong
 import db_facade
@@ -235,8 +236,13 @@ class MemoryMixin:
                                updated_at=?, last_accessed=?, access_count=access_count+1,
                                trust_level=?
                                WHERE memory_id=?""",
-                            (confidence, now, now, best_row[0],
-                             self._merge_trust(best_row[5] or "internal", trust_level)),
+                            # 实参序须对齐占位符序（confidence, updated_at, last_accessed,
+                            # trust_level, memory_id）——旧代码把 memory_id 喂给了
+                            # trust_level、WHERE 拿到信任级字符串，实测 rowcount=0
+                            # （合并分支永不生效，access_count/confidence 从不刷新）。
+                            (confidence, now, now,
+                             self._merge_trust(best_row[5] or "internal", trust_level),
+                             best_row[0]),
                         )
                         memory_id = best_row[0]
                         action = "merge"
@@ -335,10 +341,12 @@ class MemoryMixin:
                     _outbox_enqueue(c, "shadow_mirror",
                                     {"kind": "memory", "memory_id": memory_id})
 
-                conn.commit()
+                # 提交由门面负责（write=True 成功路径自动 commit，异常路径 rollback）——
+                # fn 内不得自行 commit（旧代码 write=False + fn 内 commit 违反门面契约：
+                # 异常发生在 commit 之后时已提交数据无法回滚，且门面语义被架空）。
                 return action, memory_id
 
-            action, memory_id = await db_facade.run_in_conn(_txn, write=False)
+            action, memory_id = await db_facade.run_in_conn(_txn, write=True)
 
             # CD-046: 业务已提交 —— 现在才执行向量操作（单个失败不中断其余，
             # 失败落 vector_index 补偿事件，消费者用库内 blob 重灌）
@@ -466,9 +474,13 @@ class MemoryMixin:
         for op in vector_ops:
             try:
                 if op["op"] == "delete":
-                    collection.delete(ids=[op["memory_id"]])
+                    # chroma collection 的 upsert/delete 是同步阻塞 IO——直调会把
+                    # 事件循环串行化（同 CD-017 教训），包 to_thread 卸载到线程。
+                    # 两个调用点（store_memory / delete_memory）均在 async 上下文。
+                    await asyncio.to_thread(collection.delete, ids=[op["memory_id"]])
                 else:
-                    collection.upsert(
+                    await asyncio.to_thread(
+                        collection.upsert,
                         ids=[op["memory_id"]],
                         embeddings=[op["embedding"]],
                         metadatas=[op["metadata"]],
@@ -924,9 +936,17 @@ class MemoryMixin:
         )
 
 
-    async def semantic_search(self, req: SemanticSearchRequest, scope: dict = None) -> dict:
-        """语义搜索 — 委托给 DisclosureEngine（1e: scope 透传）"""
-        return await self.disclosure.semantic_search(req, scope=scope)
+    async def semantic_search(self, req: SemanticSearchRequest, scope=_SCOPE_UNSET,
+                              internal: bool = False) -> dict:
+        """语义搜索 — 委托给 DisclosureEngine（1e: scope 透传）
+
+        CD-105（2026-09-24）：签名对齐 disclosure.semantic_search 的 fail-closed
+        哨兵默认值——默认 `_SCOPE_UNSET`（未声明主体上下文 → metadata 封顶），
+        **不能**保留默认 None（否则默认路径会把 fail-closed 吞掉）。internal 逃生门
+        原样透传（调用点必须注释理由，见 disclosure.semantic_search docstring）。
+        """
+        return await self.disclosure.semantic_search(
+            req, scope=scope, internal=internal)
 
 
     def _extract_by_level(self, memory: dict, level: DisclosureLevel) -> str:

@@ -14,6 +14,7 @@ from notifications import notifications
 from routes_common import (
     NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
     _scope_client_ip, get_current_agent, get_current_agent_optional,
+    get_current_principal,
     require_ops_privilege, log_ops_trigger,
 )
 from routes_common import require_role  # CD-074（hub_token 放行的 canonical 角色门）
@@ -24,11 +25,14 @@ router = APIRouter()
 async def api_chunks_search(
     request: Request,
     current_agent: str = Depends(get_current_agent),
+    principal=Depends(get_current_principal),
 ):
     """检索文档 chunk（披露过滤 + 防拼接滑窗）
 
     body: {"query": str, "doc_id": str(可选), "limit": int(默认10)}
     返回: results(chunk_id/piece_index/disclosure_level/content) + parent_hint(布尔) + degraded
+    修复轮：scoped key 的 scope（level_cap/data_domain）沿调用链传入披露判定；
+    普通 api_key（principal.scope 为空）行为不变。
     """
     try:
         data = await request.json()
@@ -39,10 +43,12 @@ async def api_chunks_search(
     limit = int(data.get("limit", 10) or 10)
     if limit < 1 or limit > 100:
         limit = 10
+    scope = getattr(principal, "scope", None) if principal else None
     from disclosure import DisclosureEngine
     engine = DisclosureEngine(hub)
     return await engine.search_chunks(
         requester=current_agent, query=query, doc_id=doc_id, limit=limit,
+        scope=scope,
     )
 
 
@@ -66,7 +72,14 @@ async def api_chunks_ingest(
     if not doc_id or not content:
         raise HTTPException(400, "doc_id 和 content 必填")
     kind = data.get("kind", "fact") or "fact"
-    source_agent_id = data.get("source_agent_id", "") or current_agent
+    # 修复轮：来源归属锁死为调用者本人；仅 manager/orchestrator（或 hub_token）
+    # 可显式代他人汇入，其余显式指定他人 → 403（防来源伪造）
+    source_agent_id = (data.get("source_agent_id", "") or "").strip() or current_agent
+    if source_agent_id != current_agent:
+        require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                     roles=("manager", "orchestrator",),
+                     detail="仅主管/店长可代他人汇入数据",
+                     principal=getattr(request, "scope", {}).get("principal"))
     trust_level = data.get("trust_level", "") or "trusted"
     owner_role = (hub.agents.get(current_agent, {}) or {}).get("role", "worker")
     return await hub.ingest_chunks(

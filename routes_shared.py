@@ -1,4 +1,7 @@
 """星枢 Sync Hub — 共享工作区 API（Phase 2 拆分自 routes.py，端点路径与行为不变）"""
+import logging
+logger = logging.getLogger("xingshu.routes_shared")
+
 import asyncio, json, os, sqlite3, time, uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -8,7 +11,7 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from pydantic import BaseModel as PydanticBase, Field as PydanticField
 
-from models import CONFIG
+from models import CONFIG, DisclosureLevel
 from hub_core import hub, hub_agent
 from notifications import notifications
 from routes_common import (
@@ -29,22 +32,77 @@ def _ws():
     return _sw.workspace
 
 
-# 轻量 JSON watcher 集合：doc_id → {agent_id: (websocket, joined_at)}（含 awareness）
+def _is_hub_token_principal(principal) -> bool:
+    """CD-094：principal 是否为 hub_token 部署级运维主体（Principal 对象或 dict 均兼容）。"""
+    if not principal:
+        return False
+    if isinstance(principal, dict):
+        return principal.get("auth_mode") == "hub_token"
+    return getattr(principal, "auth_mode", "") == "hub_token"
+
+
+# CD-104：判定下沉自 routes_ws（底座方向），watch 广播逐人组帧复用；准入行为一字不变
+async def _shared_doc_ws_level(doc_id: str, agent_id: str, principal) -> DisclosureLevel:
+    """主体对该共享文档的披露级别（CD-094 WS 门用）。
+
+    fail-closed 收口：meta 不存在 → NONE；private 文档非成员（can_access 为假，
+    与 REST 读出口第一道门同源）→ 恒 NONE，不进规则链。
+    """
+    if _is_hub_token_principal(principal):
+        return DisclosureLevel.FULL
+    ws_inst = _ws()
+    meta = await ws_inst.get_doc_meta(doc_id) if ws_inst is not None else None
+    if meta is None:
+        return DisclosureLevel.NONE
+    if (meta.get("visibility") or "team") == "private" \
+            and not await ws_inst.can_access(doc_id, agent_id):
+        return DisclosureLevel.NONE
+    from disclosure import DisclosureEngine  # 延迟 import：避循环依赖
+    return DisclosureEngine(hub).shared_doc_level(
+        meta, agent_id,
+        scope=getattr(principal, "scope", None) if principal else None,
+        principal_known=principal is not None)
+
+
+# 轻量 JSON watcher 集合：doc_id → {agent_id: (websocket, joined_at, principal)}（含 awareness）
 _shared_watchers: dict[str, dict] = {}
 
 
 async def _broadcast_shared_update(doc_id: str, event: dict):
-    """向所有轻量 watcher 广播 JSON 事件（附带在线协作者列表 = awareness）"""
+    """向所有轻量 watcher 广播 JSON 事件（附带在线协作者列表 = awareness）。
+
+    CD-104：按 watcher 逐人组帧——FULL/SUMMARY 原样（preview 前 100 字），
+    METADATA 剥离 preview 为空串 + preview_stripped=true，NONE fail-closed 不推；
+    判定抛异常同样 fail-closed 跳过。shared_presence（无 preview 键）不剥离。
+    """
     import json as _json
     watchers = _shared_watchers.get(doc_id, {})
     dead = set()
     # 在线协作者（awareness）
-    online = [aid for aid, (ws, _j) in watchers.items() if aid and aid != "__anon__"]
-    event = {**event, "online": online}
-    msg = _json.dumps(event)
-    for aid, (ws, _j) in list(watchers.items()):
+    online = [aid for aid, entry in watchers.items() if aid and aid != "__anon__"]
+    base = {**event, "online": online}
+    has_preview = "preview" in event
+    dumps_cache: dict = {}
+    for aid, entry in list(watchers.items()):
+        ws = entry[0]
+        principal = entry[2] if len(entry) > 2 else None
         try:
-            await ws.send_text(msg)
+            level = await _shared_doc_ws_level(doc_id, aid, principal)
+        except Exception as _exc:
+            logger.warning("CD-104 level judge failed, skip watcher %s@%s: %s",
+                           aid, doc_id, _exc)
+            continue
+        if level == DisclosureLevel.NONE:
+            continue
+        stripped = has_preview and level == DisclosureLevel.METADATA
+        if stripped not in dumps_cache:
+            frame = dict(base)
+            if stripped:
+                frame["preview"] = ""
+                frame["preview_stripped"] = True
+            dumps_cache[stripped] = _json.dumps(frame)
+        try:
+            await ws.send_text(dumps_cache[stripped])
         except Exception:
             dead.add(aid)
     for aid in dead:
@@ -70,7 +128,8 @@ async def _close_shared_watchers(doc_id: str, reason: str = "doc archived") -> i
     import json as _json
     watchers = _shared_watchers.pop(doc_id, {}) or {}
     msg = _json.dumps({"type": "shared_archived", "doc_id": doc_id, "reason": reason})
-    for _aid, (ws, _j) in list(watchers.items()):
+    for _aid, entry in list(watchers.items()):
+        ws = entry[0]
         try:
             await ws.send_text(msg)
         except Exception:
@@ -90,6 +149,12 @@ async def api_shared_list(current_agent: str = Depends(get_current_agent),
     if ws_inst is None:
         return {"docs": []}
     docs = await ws_inst.list_docs(current_agent)
+    # CD-094：level_cap=none 的 scoped key 连元数据列表也不给（fail-closed）；
+    # 其余级别（含 metadata）可见列表——列表本就是元数据。
+    _scope = getattr(principal, "scope", None) if principal else None
+    if _scope and (_scope.get("level_cap") or "") == "none":
+        _log_read(current_agent, principal, "shared", "", "", "none", 0, 0)
+        return {"docs": []}
     # CD-054: 读审计落链（仅成功路径；_log_read 内部 except 不阻塞读取，D4）
     _log_read(current_agent, principal, "shared", "", "", "metadata", len(docs), 0)
     return {"docs": docs}
@@ -135,6 +200,46 @@ async def api_shared_get(doc_id: str, current_agent: str = Depends(get_current_a
     if content is None:
         _log_deny(current_agent, principal, "shared", "", doc_id)
         raise HTTPException(404, "doc not found")
+    # CD-094（方案①）：读出口按主体披露级别剥离——级别 = min(主体判定
+    # [8 规则链 + scoped key level_cap/data_domain], 文档密级[trust_level 映射])，
+    # 判定逻辑收口在 disclosure.DisclosureEngine.shared_doc_level。
+    # principal=None = NO_AUTH 开发态（无身份语义）→ 主体侧不判定，但文档密级仍生效。
+    meta = await ws_inst.get_doc_meta(doc_id)
+    if meta is None:
+        # can_access 刚放行而元数据行已消失（并发删除竞态）——按不存在处理
+        _log_deny(current_agent, principal, "shared", "", doc_id)
+        raise HTTPException(404, "doc not found")
+    from disclosure import DisclosureEngine
+    if _is_hub_token_principal(principal):
+        # hub_token 部署级运维主体（D1 不做 RBAC）：读出口不剥离，与上方
+        # 「404/403 可区分」特权语义同源（控制台排查不受影响）。
+        # 仅精确匹配 auth_mode=="hub_token"——scoped key（api_key 模式）永不命中，
+        # manager/orchestrator 角色的普通 api_key 也不经此旁路（仍走规则链）。
+        level = DisclosureLevel.FULL
+    else:
+        level = DisclosureEngine(hub).shared_doc_level(
+            meta, current_agent,
+            scope=getattr(principal, "scope", None) if principal else None,
+            principal_known=principal is not None)
+    if level == DisclosureLevel.NONE:
+        # 与上方「无权」同一 403 + 同 detail（T17 冻结），不可由差异反推密级
+        _log_deny(current_agent, principal, "shared", "", doc_id)
+        raise HTTPException(403, "无权访问该文档")
+    if level == DisclosureLevel.METADATA:
+        # 只回元数据，无 content 键；审计记 granted_level=metadata + 剥离 1 段正文
+        _log_read(current_agent, principal, "shared", "", doc_id, "metadata", 1, 1)
+        return {"doc_id": doc_id, "title": meta.get("title") or "",
+                "created_by": meta.get("created_by") or "",
+                "created_at": meta.get("created_at"),
+                "updated_at": meta.get("updated_at"),
+                "block_count": meta.get("block_count", 0),
+                "visibility": meta.get("visibility") or "team",
+                "disclosure_level": "metadata"}
+    if level == DisclosureLevel.SUMMARY:
+        # 摘要级：正文前 200 字 + truncated 标记（与 _extract_by_level 的 200 字口径一致）
+        _log_read(current_agent, principal, "shared", "", doc_id, "summary", 1, 1)
+        return {"doc_id": doc_id, "content": content[:200],
+                "truncated": len(content) > 200, "disclosure_level": "summary"}
     # CD-054: 读审计落链（成功路径；403/404 拒绝由上方 _log_deny 落 denied 行，CD-059）
     _log_read(current_agent, principal, "shared", "", doc_id, "full", 1, 0)
     return {"doc_id": doc_id, "content": content}

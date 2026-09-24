@@ -14,6 +14,7 @@ from notifications import notifications
 from routes_common import (
     NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
     _scope_client_ip, get_current_agent, get_current_agent_optional,
+    require_role,
 )
 
 router = APIRouter()
@@ -22,9 +23,14 @@ router = APIRouter()
 async def api_approve_disclosure(
     request_id: str,
     approver_id: str,
+    request: Request,
     current_agent: str = Depends(get_current_agent),
 ):
-    """店长批准披露升级请求"""
+    """店长批准披露升级请求（仅 manager/orchestrator；hub_token 主体经 principal 放行）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可批准披露升级",
+                 principal=getattr(request, "scope", {}).get("principal"))
     if not NO_AUTH and current_agent != approver_id:
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份操作")
@@ -35,10 +41,15 @@ async def api_approve_disclosure(
 async def api_deny_disclosure(
     request_id: str,
     approver_id: str,
+    request: Request,
     deny_reason: str = "",
     current_agent: str = Depends(get_current_agent),
 ):
-    """店长拒绝披露升级请求"""
+    """店长拒绝披露升级请求（仅 manager/orchestrator；hub_token 主体经 principal 放行）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可拒绝披露升级",
+                 principal=getattr(request, "scope", {}).get("principal"))
     if not NO_AUTH and current_agent != approver_id:
         raise HTTPException(status_code=403,
             detail=f"Forbidden: 不能以 {current_agent} 身份操作")

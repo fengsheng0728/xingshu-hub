@@ -183,7 +183,9 @@ def simulate(
         if policy.get("allow_peer_disclosure", True):
             assigned = task.get("assigned_agent_id", "")
             creator = task.get("creator_agent_id", "")
-            if requester in (assigned, creator) or owner in (assigned, creator):
+            # 语义收紧（修复轮，镜像 disclosure.py 规则 7）：仅请求方本人参与任务放行；
+            # 删去 owner in (...) 半条件（受害者参与过的 task_id 不再泄露其记忆）
+            if requester in (assigned, creator):
                 return DisclosureLevel.SUMMARY, "r7_peer_collab"
         # r4_published_public（CD-033A 2026-09-17，镜像 disclosure.py 规则 7 链尾）：
         # 仅当本将判 NONE + 带 published 标记 + 开关开 → 提升 SUMMARY。

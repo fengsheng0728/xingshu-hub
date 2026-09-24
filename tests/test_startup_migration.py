@@ -207,16 +207,91 @@ def test_head_revision_exists_in_versions_dir(head):
 
 
 def test_real_read_path_on_production_copy(tmp_path):
-    """只读复制生产库 → 真实读路径应判「已是最新」。不碰生产库本体（CD-070 纪律）。"""
+    """只读复制生产库 → 真实读路径跑到 head。不碰生产库本体（CD-070 纪律）。
+
+    终审断点 3（2026-09-23）后 head=0013：生产库停在 0012 → 首次检查判
+    upgraded（0013 对已哈希库为 no-op，只推进版本指针）；二次检查应判 up_to_date
+    且不再改写库文件（「判定为最新时零改写」这条不变）。
+    """
     prod = _find_production_db()
     if not prod:
         pytest.skip("找不到生产库 ./sync_hub.db（本机/CI 无该文件），跳过真实读路径用例")
     dst = str(tmp_path / "prod-copy.db")
     shutil.copy2(prod, dst)
-    before = os.path.getsize(dst)
 
+    head = main_mod._alembic_head(REPO)
     res = main_mod.run_startup_migration(dst, repo_root=REPO)
+    assert res["action"] in ("upgraded", "up_to_date"), f"生产库副本迁移异常: {res}"
+    assert res["to"] == head, f"副本应到 head（{head}）: {res}"
+    assert main_mod._db_alembic_version(dst) == head
+    size_after = os.path.getsize(dst)
 
-    assert res["action"] == "up_to_date", f"生产库应已在 head: {res}"
-    assert main_mod._db_alembic_version(dst) == res["to"]
-    assert os.path.getsize(dst) == before, "判定为最新时不应改写库文件"
+    res2 = main_mod.run_startup_migration(dst, repo_root=REPO)
+    assert res2["action"] == "up_to_date", f"二次检查应判最新: {res2}"
+    assert os.path.getsize(dst) == size_after, "判定为最新时不应改写库文件"
+
+
+def _agents_cols(db_path):
+    """读 agents 表列名集合（判 0013 兜底补列是否生效）。"""
+    conn = sqlite3.connect(str(db_path))
+    try:
+        return {r[1] for r in conn.execute("PRAGMA table_info(agents)")}
+    finally:
+        conn.close()
+
+
+# ── 8. 全新库 init_db 自动登记 head（数据层修复轮）──────────────────────────
+# 先红背景：init_db 建的全新库没有 alembic_version 表 → 本检查把它们归入
+# skipped_no_version_table 永久跳过，此后新增 revision 永远不会作用到这些库。
+# 修复：init_db 对全新库登记 alembic 版本，使「全新库」与「已迁移库」不可区分；
+# 老库（已有表但无登记）不猜不动。
+# 终审断点 3 修正（2026-09-23）：内联 agents DDL **有意不含** api_key_hash /
+# api_key_prev_hash（CD-060 登记差异），若直接登记 head，兜底迁移 0013 永不执行
+# → 新部署永久明文模式且启动迁移报 up_to_date 误导。故缺列库只登记到 head 前一版，
+# 0013 由启动迁移 / `alembic upgrade head` 执行补列。
+# CD-111 连带回归修复（2026-09-24，Hermes 验收期实测）：0014 落地后 head=0014，
+# 「head 前一版」漂到 0013，0013 兜底补列被跳过 → agents 永久缺 hash 两列（本用例抓出）。
+# 登记目标改为**最早一条内联 DDL 缺口迁移的前一版**（db._INLINE_DDL_GAP_REVISIONS），
+# head 再前进也不漂。本断言由验收方按新契约同步（非执行方扩面，未放宽任何判据）。
+
+
+def test_fresh_init_db_stamps_head(tmp_path, monkeypatch, head):
+    import models
+    db_path = str(tmp_path / "fresh.db")
+    monkeypatch.setattr(models.CONFIG, "DB_PATH", db_path)
+    import db as dbmod
+    dbmod.init_db()
+
+    # 缺 hash 列（CD-060 内联 DDL 口径）→ 只登记到「最早缺口迁移」的前一版，
+    # 留 0013 兜底补列（CD-111 连带回归修复后为固定锚，不随 head 漂移）
+    prev = dbmod._alembic_down_revision(dbmod._INLINE_DDL_GAP_REVISIONS[0])
+    assert prev, "最早缺口迁移必须有前一版 revision（0013 兜底迁移的前置）"
+    expect = head if "api_key_hash" in _agents_cols(db_path) else prev
+    assert main_mod._db_alembic_version(db_path) == expect, \
+        f"全新库应登记到 {expect}（缺 hash 列时停在最早缺口迁移的前一版）"
+    res = main_mod.run_startup_migration(db_path, repo_root=REPO)
+    assert res["action"] == "upgraded" and res["to"] == head, \
+        f"全新库应执行兜底迁移到 head（不再 skipped_no_version_table），实际: {res}"
+    assert main_mod._db_alembic_version(db_path) == head
+    cols = _agents_cols(db_path)
+    assert {"api_key_hash", "api_key_prev_hash"} <= cols, \
+        f"0013 兜底补列后 agents 应含 hash 两列，实测: {sorted(cols)}"
+
+
+def test_legacy_db_without_version_table_not_stamped(tmp_path, monkeypatch):
+    """老库（建库前已有业务表、无 alembic_version）不猜不登记——
+    main.py 的 skipped_no_version_table 告警口径对它保持不变。"""
+    import models
+    db_path = str(tmp_path / "legacy.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE agents (agent_id TEXT PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(models.CONFIG, "DB_PATH", db_path)
+    import db as dbmod
+    dbmod.init_db()
+
+    assert main_mod._db_alembic_version(db_path) is None, \
+        "已有库不得被自动登记（否则落后老库被误判为最新，升级路径被绕过）"
+    res = main_mod.run_startup_migration(db_path, repo_root=REPO)
+    assert res["action"] == "skipped_no_version_table", res

@@ -22,12 +22,18 @@ import tempfile
 import pytest
 
 os.environ.setdefault("SYNC_HUB_NO_AUTH", "1")
+# CD-099（2026-09-23）：代码默认 registration 已由 open→guarded（默认安全收口）。
+# 测试态经此 env 显式回落 open（models 仅在 config.yaml 未写 auth.registration 时采信
+# env——显式 config 优先）：保持本篇「不依赖代码默认值漂移」的原意，test_dm /
+# test_register_role_preserve 等直调 register 的测试语义不变；需 guarded 的专项测试
+# （test_register_guard/test_key_issue_e2e）在自有 config.yaml 显式写值，不受影响。
+os.environ.setdefault("SYNC_HUB_REGISTRATION", "open")
 # 阶段3: 单元测试强制关影子数据底座（防污染真实 data-trunk）
 os.environ.setdefault("SYNC_HUB_DATA_TRUNK", "0")
 # config.yaml 是 git-ignored 本地 dev 配置（可含 auth.registration: guarded / OGA
 # hub_token / notify_channels 等）——测试不得依赖其内容（否则机器相关、pre-push 门禁
-# 随机红）。指向空目录 → models 回落代码默认（registration=open, 2026-09-08 实测:
-# config.yaml=guarded 时 test_register_role_preserve/test_dm 等 13 failed）。
+# 随机红）。指向空目录 + SYNC_HUB_REGISTRATION=open（上行）→ registration 恒为 open
+# （2026-09-08 实测: config.yaml=guarded 时 test_register_role_preserve/test_dm 等 13 failed）。
 # 需 guarded 语义的专项测试(test_register_guard/test_key_issue_e2e)自起子进程并显式
 # 覆盖 SYNC_HUB_CONFIG_DIR, 不受此影响。
 #

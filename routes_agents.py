@@ -19,6 +19,7 @@ from routes_common import (
     invalidate_agent_quotas,  # CD-040: 配额变更后清快照
     NO_AUTH, AUTH_WHITELIST, _authenticate, _auth_provider, _valid_credential,
     _scope_client_ip, get_current_agent, get_current_agent_optional,
+    require_role,
 )
 
 router = APIRouter()
@@ -36,7 +37,10 @@ async def api_agent_quotas(current_agent: str = Depends(get_current_agent)):
 async def api_set_agent_quota(request: Request,
                                 current_agent: str = Depends(get_current_agent)):
     """O4：设置某 Agent 配额。body: {agent_id, qps_limit?, mode?, burst?}
-    mode 取值 reject|throttle|alert_only。"""
+    mode 取值 reject|throttle|alert_only。（仅 manager/orchestrator）"""
+    require_role(current_agent, agents=hub.agents, no_auth=NO_AUTH,
+                 roles=("manager", "orchestrator"),
+                 detail="仅主管/店长可设置 Agent 配额")
     body = await request.json()
     agent_id = (body.get("agent_id") or "").strip()
     if not agent_id:
@@ -169,6 +173,10 @@ async def api_bootstrap(request: Request, agent: AgentRegistration):
 
 @router.post("/api/v1/agents/{agent_id}/heartbeat")
 async def api_heartbeat(agent_id: str, current_agent: str = Depends(get_current_agent)):
+    """Agent 心跳：身份必须与路径 agent_id 匹配（hub_token 声明同 id 天然通过）"""
+    if not NO_AUTH and current_agent != agent_id:
+        raise HTTPException(status_code=403,
+            detail=f"Forbidden: 不能以 {current_agent} 身份操作 {agent_id}")
     return await hub.heartbeat(agent_id)
 
 

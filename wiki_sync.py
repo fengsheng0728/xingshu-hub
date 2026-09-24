@@ -177,10 +177,19 @@ def _federate_pull(dry_run: bool = False):
                 continue
 
             # Import pages
+            # 联邦快照链断裂修复轮：import 调用补 Authorization 头（对齐 export 侧）。
+            # CD-110（2026-09-24）已收口：本地 /api/v1/wiki/import 与 /wiki/export
+            # 走「路由层豁免 + 端点函数内双通道自认证」（routes_common.authorize_federated_caller，
+            # 与 /api/v1/federation/snapshot 同型）——配对凭据 team_members.remote_api_key
+            # 未撤销命中即放行，原注释所述「本地这半边仍会被 401/403 拒 / 需父代理决策」解除。
+            # 同轮顺手修真 bug：import 调用端口不再硬编码 3060，改取 CONFIG.SERVER_PORT
+            #（缺省 3060）——否则部署在非 3060 端口时该调用必失败。
+            _local_port = getattr(CONFIG, "SERVER_PORT", 3060) or 3060
             import_req = _req.Request(
-                f"http://localhost:3060/api/v1/wiki/import",
+                f"http://localhost:{_local_port}/api/v1/wiki/import",
                 data=_json.dumps({"pages": pages}).encode(),
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {api_key}"},
                 method="POST",
             )
             with _req.urlopen(import_req, timeout=30) as resp:

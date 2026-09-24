@@ -84,6 +84,7 @@ def _archive_file(data_trunk, branch, rel_path, memory_id, reason, db_path=None)
     if db_path:
         try:
             conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA busy_timeout = 5000")  # 对齐 outbox 口径，防瞬时 locked
             conn.execute(
                 "INSERT INTO events (event_type, agent_id, payload, timestamp)"
                 " VALUES (?, ?, ?, ?)",
@@ -135,6 +136,7 @@ def reconcile_shadow_archives(data_trunk, db_path=None):
         return stats
     try:
         conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA busy_timeout = 5000")  # 对齐 outbox 口径，防瞬时 locked
     except Exception as e:
         logger.warning("reconcile 连库失败 %s: %s → 拒绝执行",
                        type(e).__name__, str(e)[:200])

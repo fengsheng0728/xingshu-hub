@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import audit.memory_audit as memory_audit  # noqa: E402
 import models  # noqa: E402
 import routes_memory  # noqa: E402
+from hub_mixins.memory import MemoryMixin  # noqa: E402
 
 
 @pytest.fixture()
@@ -149,11 +150,12 @@ def test_m3_memory_versions_logs_read(env):
 # ═══════════ M-4 POST /memory/semantic_search（假语义检索，不连 chroma） ═══════════
 
 def test_m4_semantic_search_logs_read(env, monkeypatch):
-    async def _fake_semantic(req, scope=None):
+    async def _fake_semantic(self, req, scope=None):
         return {"query": req.query, "total": 2,
                 "memories": [{"memory_id": "m1"}, {"memory_id": "m2"}]}
 
-    monkeypatch.setattr(routes_memory.hub, "semantic_search", _fake_semantic)
+    # CD-114：类级打桩（实例级会给单例留下永久实例属性，遮蔽后续类级 monkeypatch）
+    monkeypatch.setattr(MemoryMixin, "semantic_search", _fake_semantic)
     before = len(_log_rows(env))
     req = models.SemanticSearchRequest(
         query="语义查询", requester_agent_id="agent-a", filter_owner="agent-a")

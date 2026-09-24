@@ -120,7 +120,9 @@ class NotificationsMixin:
                     import json as _json
                     gr = _json.loads(job.get('guardrail', '{}')) if isinstance(job.get('guardrail'), str) else job.get('guardrail', {})
                     dl = _json.loads(job.get('delivery', '["notification"]')) if isinstance(job.get('delivery'), str) else job.get('delivery', ["notification"])
-                    await ws.send_json({
+                    # CD-098 漏网收口：事件触发派发也走 notifications.safe_send
+                    # （per-agent 发送锁防帧交错），并按投递成功数判失败
+                    delivered = await notifications.safe_send(agent_id, {
                         "type": "automation.run",
                         "job_id": job["id"],
                         "name": job.get("name", ""),
@@ -128,6 +130,10 @@ class NotificationsMixin:
                         "guardrail": gr,
                         "delivery": dl,
                     })
+                    if delivered == 0:
+                        # 死连接/零投递：对齐离线语义记 missed，run_count 不虚增
+                        await _facade_execute("UPDATE automation_jobs SET missed_runs=missed_runs+1 WHERE id=?", (job['id'],))
+                        continue
                     await _facade_execute("UPDATE automation_jobs SET run_count=run_count+1, last_run_at=datetime('now'), last_status='dispatched' WHERE id=?", (job['id'],))
                 except Exception as _exc2: logger.debug("run_count update failed: %s", _exc2)
         except Exception as _exc: logger.warning("notifications automation dispatch failed: %s", _exc)

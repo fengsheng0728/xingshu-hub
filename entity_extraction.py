@@ -21,7 +21,10 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Dict, List, Optional
+
+import tracing
 
 logger = logging.getLogger("entity_extraction")
 
@@ -103,11 +106,35 @@ async def _llm_extract(content: str, llm_config: Dict) -> Dict:
     }
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(
-                f"{base.rstrip('/')}/chat/completions",
-                json=payload,
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            )
+            _req_chars = len(json.dumps(payload, ensure_ascii=False))
+            with tracing.llm_span(llm_config.get("provider", "openai-compatible"), model,
+                                  span_name="llm.extract") as _sp:
+                _t0 = time.perf_counter()
+                try:
+                    resp = await client.post(
+                        f"{base.rstrip('/')}/chat/completions",
+                        json=payload,
+                        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+                    )
+                except Exception as _e:
+                    tracing.record_llm_result(_sp, latency_ms=(time.perf_counter() - _t0) * 1000,
+                                              request_chars=_req_chars, status="error",
+                                              error=type(_e).__name__)
+                    raise
+                _lat = (time.perf_counter() - _t0) * 1000
+                try:
+                    _usage = (resp.json() or {}).get("usage") or {}
+                    _pt = _usage.get("prompt_tokens")
+                    _ct = _usage.get("completion_tokens")
+                    _rc = len(resp.text or "")
+                except Exception:
+                    _pt = _ct = _rc = None
+                tracing.record_llm_result(_sp, latency_ms=_lat, request_chars=_req_chars,
+                                          response_chars=_rc, prompt_tokens=_pt,
+                                          completion_tokens=_ct,
+                                          status="ok" if resp.status_code == 200 else "error",
+                                          error=None if resp.status_code == 200
+                                          else f"HTTP {resp.status_code}")
             if resp.status_code != 200:
                 logger.warning(f"LLM 抽取失败 HTTP {resp.status_code}，降级启发式")
                 return _heuristic_extract(content)

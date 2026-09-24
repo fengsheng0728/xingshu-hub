@@ -22,6 +22,7 @@ from pycrdt.store import SQLiteYStore
 from pycrdt.websocket import YRoom
 
 from models import CONFIG  # 3-7(2026-09-10): 容量护栏配置（TTL/水位阈值）
+from logfmt import rotate_request_id
 
 # CD-070b（2026-09-20）：pycrdt 的 SQLiteYStore 把所有 room 写进**类属性** db_path
 # （默认 "ystore.db"，cwd 相对 → 仓库根），传入的 path 只作为 room 名记录。
@@ -209,6 +210,7 @@ class SharedWorkspace:
         """3-7(2026-09-10): 周期性清扫。stop() 置 _stopping 后 ≤1s 内退出，不留悬挂 task。"""
         interval = max(1, getattr(CONFIG, "WORKSPACE_SWEEP_INTERVAL_SEC", 60))
         while not self._stopping:
+            rotate_request_id("ws-sweeper")  # CD-116：每轮 tick 轮换 request id
             # 分片睡眠（每片 1s）：保证 stop() 后清扫循环能及时检查 _stopping 退出
             for _ in range(interval):
                 if self._stopping:
@@ -314,6 +316,23 @@ class SharedWorkspace:
         if "content" in ydoc:
             return str(ydoc["content"])
         return ""
+
+    async def get_doc_meta(self, doc_id: str) -> dict | None:
+        """CD-094：读出口按主体级别剥离需要文档归属/密级元数据（shared_docs 行）。
+        不存在 → None（调用方按既有「不存在」语义处理）。"""
+        import sqlite3
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT doc_id, title, created_by, created_at, updated_at, block_count,"
+            " visibility, allowed_agents, trust_level"
+            " FROM shared_docs WHERE doc_id = ?",
+            (doc_id,),
+        ).fetchone()
+        conn.close()
+        if row is None:
+            return None
+        return {k: row[k] for k in row.keys()}
 
     async def append_block(self, doc_id: str, text: str, agent_id: str) -> bool:
         ydoc = self._docs.get(doc_id)

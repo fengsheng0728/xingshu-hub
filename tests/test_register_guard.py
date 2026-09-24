@@ -7,7 +7,8 @@
   3. 末尾 kill + rmtree 清理
 
 覆盖：
-  T1 启动校验：guarded + 空 hub_token → main.py 退出码非 0, stderr 含 [FATAL]
+  T1 启动校验（CD-099 2026-09-23 收口后口径）：空/占位 hub_token + 非回环 host →
+      main.py 退出码非 0, stderr 含 [FATAL]；空 token + 回环 host → [WARN] 但正常启动
   T2 无 token → 401（中间件强制 hub_token）
   T3 错 token → 401
   T4 未预签 agent_id → 403 且不建号
@@ -85,27 +86,84 @@ def _db_role_and_key(db_path: str, agent_id: str):
         conn.close()
 
 
-def test_t1_guarded_without_hub_token_refuses_start():
-    """T1: registration=guarded 但 hub_token 为空 → 拒绝启动, 退出码非 0, stderr 含 [FATAL]"""
-    tmpdir = tempfile.mkdtemp(prefix="oga-t1-")
+def _prod_env(cfg_dir: str, tmpdir: str) -> dict:
+    """模拟生产态的子进程 env：剥掉全部测试标记（PYTEST_VERSION/DB_GUARD/NO_AUTH），
+    否则 models._in_test_context() 为真，CD-099 的 hub_token 启动硬门被跳过。"""
+    env = _subprocess_env(cfg_dir, tmpdir)
+    for k in ("PYTEST_VERSION", "PYTEST_CURRENT_TEST", "SYNC_HUB_DB_GUARD",
+              "SYNC_HUB_REGISTRATION"):
+        env.pop(k, None)
+    return env
+
+
+def test_t1_placeholder_or_empty_token_non_loopback_refuses_start():
+    """T1a（CD-099）：空/占位 hub_token + 非回环 host → 拒绝启动, 退出码非 0, stderr 含 [FATAL]
+
+    CD-099 前口径是「guarded + 空 token」才拦；收口后任何 registration 模式下
+    空/占位 token + 0.0.0.0 都拦（0.0.0.0 裸奔与注册模式无关）。"""
+    for token in ("", "CHANGE_ME_强随机值"):
+        tmpdir = tempfile.mkdtemp(prefix="oga-t1-")
+        try:
+            cfg_dir = os.path.join(tmpdir, "config")
+            _write_config(cfg_dir, {
+                "server": {"host": "0.0.0.0", "port": 3071},
+                "auth": {"enabled": True, "registration": "guarded", "hub_token": token},
+                "database": {"path": os.path.join(tmpdir, "t1.db"), "backup_enabled": False},
+                "logging": {"level": "warning"},
+            })
+            # 进程秒退（uvicorn.run 之前 sys.exit）, PIPE 读 stderr 不会卡死
+            # 注：不用 text=True —— 父进程 locale 是 GBK 时解码子进程 UTF-8 输出会炸，
+            # 读 bytes 后手动按 utf-8 解码（与本仓 PYTHONUTF8 固化方向一致）。
+            r = subprocess.run(
+                [sys.executable, "main.py"],
+                cwd=REPO_ROOT, env=_prod_env(cfg_dir, tmpdir),
+                capture_output=True, timeout=120,
+            )
+            err = (r.stderr or b"").decode("utf-8", "replace")
+            assert r.returncode != 0, \
+                f"token={token!r} + 0.0.0.0 应拒绝启动, 实际 exit={r.returncode}"
+            assert "[FATAL]" in err, f"stderr 缺 [FATAL]: {err[-500:]}"
+            assert "hub_token" in err
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_t1b_empty_token_loopback_warns_but_starts():
+    """T1b（CD-099）：空 hub_token + 回环 host → [WARN] 但正常启动（本机开发不阻断）。"""
+    tmpdir = tempfile.mkdtemp(prefix="oga-t1b-")
+    proc = None
     try:
         cfg_dir = os.path.join(tmpdir, "config")
         _write_config(cfg_dir, {
-            "server": {"host": "127.0.0.1", "port": 3069},
+            "server": {"host": "127.0.0.1", "port": 3072},
             "auth": {"enabled": True, "registration": "guarded", "hub_token": ""},
-            "database": {"path": os.path.join(tmpdir, "t1.db"), "backup_enabled": False},
+            "database": {"path": os.path.join(tmpdir, "t1b.db"), "backup_enabled": False},
             "logging": {"level": "warning"},
         })
-        # 进程秒退（uvicorn.run 之前 sys.exit）, PIPE 读 stderr 不会卡死
-        r = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "main.py"],
-            cwd=REPO_ROOT, env=_subprocess_env(cfg_dir, tmpdir),
-            capture_output=True, text=True, timeout=120,
+            cwd=REPO_ROOT, env=_prod_env(cfg_dir, tmpdir),
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
         )
-        assert r.returncode != 0, f"guarded+空 hub_token 应拒绝启动, 实际 exit={r.returncode}"
-        assert "[FATAL]" in r.stderr, f"stderr 缺 [FATAL]: {r.stderr[-500:]}"
-        assert "auth.registration=guarded" in r.stderr
+        ok = False
+        for _ in range(80):
+            time.sleep(0.5)
+            try:
+                with urllib.request.urlopen("http://127.0.0.1:3072/health", timeout=2) as r:
+                    if r.status == 200:
+                        ok = True
+                        break
+            except Exception:
+                continue
+        assert ok, "空 token + 回环 host 应正常启动（仅 WARN），40s 未就绪"
+        proc.terminate()
+        _, err_b = proc.communicate(timeout=10)
+        err = (err_b or b"").decode("utf-8", "replace")
+        assert "[WARN]" in err and "hub_token" in err, \
+            f"回环 + 空 token 应打 [WARN] 横幅, stderr 尾部: {err[-400:]}"
     finally:
+        if proc and proc.poll() is None:
+            proc.kill()
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 

@@ -40,7 +40,9 @@
 | **3-1 db 异步化收口** | **改写**为「db 门面 + 慢查询护栏」：查库统一走一层门面（唯一入口），门面内部先用 `asyncio.to_thread` 跑 SQLite，**不换驱动、不深改**；存量 759 处调用点只迁热点路径。门面 = 将来替换为 `asyncpg` 的接缝。验收口径改为「慢查询可观测 + 门面为唯一入口 + 200 并发不劣于 3.59s 基线」 |
 | **3-9 本项** | 本文件即 ADR，落 `docs/architecture-decision-data-backbone.md` |
 | `data-trunk/` 影子双写、`routes_gateway.py`、`gateway_read_log` | 代码不变，文档/台账标注「非主线数据通道，备用审计镜像」 |
-| **PG 迁移时点** | 待两件事就绪：① 3-1 门面底座落地（迁移时只换门面内部）；② 新 Agent 端 harness 就绪（与 alembic 0003 的迁移时机同一条依赖链） |
+| **PG 迁移时点** | 待两件事就绪：① 3-1 门面底座落地（迁移时只换门面内部）；② ~~新 Agent 端 harness 就绪~~（与 alembic 0003 的迁移时机同一条依赖链） |
+
+> **2026-09-23 补注（Hermes 执行清理时同步）**：上表 ②「新 Agent 端 harness 就绪」**已作废** —— CD-075（2026-09-21）裁决自研 Agent 端砍掉、「以 deepseek harness 重写」计划取消，且 `E:\sync-hub-agent` 目录已于 2026-09-23 归档并删除（台账 CD-075）。故 PG 迁移的依赖**只剩 ①**。另，下面 §五 第 1 条里的「0003（api_key 哈希化）因旧 Agent 端未适配而暂缓」亦已过期：0003 早已落地（commit `39019f4`），生产库现停在 alembic `0013`（`0013_agents_api_key_hash_backstop`）—— 该阻塞随旧 Agent 端一并消失。
 
 ---
 

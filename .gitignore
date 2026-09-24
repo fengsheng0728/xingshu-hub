@@ -92,3 +92,6 @@ audit/*.jsonl
 
 # CD-079 契约验证脚本的工作目录（隔离实例的 config/db/chroma/日志）
 .contract-e2e/
+
+# KB 评估产物库（CD-081，本地首跑数字，不入库）
+eval/*.db

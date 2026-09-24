@@ -15,6 +15,7 @@ from typing import Dict, List, Optional, Any
 import numpy as np
 
 from deps import CONFIG
+from logfmt import rotate_request_id
 from notifications import notifications
 from envelope import envelope_ping, serialize
 from transport_audit import log_ping_pong
@@ -59,8 +60,11 @@ class MaintenanceMixin:
             os.makedirs(backup_dir, exist_ok=True)
 
             # 复用 CLI 的同一实现（VACUUM INTO + chroma 目录 + marker/manifest 对齐）
+            # to_thread：cmd_backup 是同步重 IO（VACUUM INTO 全库快照 + copytree），
+            # 直调会把事件循环串行化（CD-017 同类教训），卸载到线程执行。
             import hub_cli
-            result = hub_cli.cmd_backup(backup_dir, CONFIG.DB_PATH, CONFIG.CHROMA_PATH)
+            result = await asyncio.to_thread(
+                hub_cli.cmd_backup, backup_dir, CONFIG.DB_PATH, CONFIG.CHROMA_PATH)
             logger.info(f"数据库备份完成: {result.get('sqlite')}")
 
             # 清理过期备份（覆盖新形态产物：db / manifest.json / chroma_db）
@@ -215,6 +219,7 @@ class MaintenanceMixin:
         """P0-FIX: 每30s向活跃WS连接发送ping，维持心跳"""
         while self._running:
             await asyncio.sleep(self._HEARTBEAT_INTERVAL)  # 30s
+            rotate_request_id("keepalive")  # CD-108：每轮 tick 轮换 request id
             async with self._lock:
                 for aid in list(self.active_ws.keys()):
                     try:
@@ -231,6 +236,7 @@ class MaintenanceMixin:
         backup_counter = 0
         while self._running:
             await asyncio.sleep(120)  # 2 分钟心跳检查（99 人以内足够）
+            rotate_request_id("cleanup-loop")  # CD-108：每轮 tick 轮换 request id
             backup_counter += 1
             # 每 30 分钟备份一次 (30×60/120 = 15 cycles)
             if backup_counter >= 15:

@@ -896,6 +896,466 @@ def verify_tsa(db_path: str, out_dir: str = "") -> Dict:
             "mismatches": mismatches, "out_dir": out_dir}
 
 
+# ── CD-034 R4（2026-09-21 拍板）：RFC3161 TSA 令牌离线验签 + 远端锚取回比对 ──
+# 拍板①：钉 TSA 签名证书指纹 / 可信 CA 指纹——不钉则验签等于白验（谁都能自签一个
+#         「合法」令牌）。指纹列表空 = 未配置 = fail-closed unverified（不假绿）。
+# 拍板②：cryptography 只允许在验签路径内**延迟导入**，缺失即 unverified；
+#         核心哈希链维持零依赖手写 DER 现状（上面的 _der* 编码器不动）。
+#
+# 信任配置来源（优先级：显式入参 > 环境变量 > JSON 配置文件）：
+#   - 环境变量 SYNC_HUB_TSA_TRUSTED_FP：逗号/空白分隔的 SHA-256 指纹（hex，可带冒号）
+#   - JSON 文件 audit/tsa_trust.json：{"trusted_fingerprints": ["..."]}
+# 不碰 models.py（别人在改），故用 env + audit/ 下 JSON 承载配置。
+
+_OID_SIGNED_DATA = "1.2.840.113549.1.7.2"       # PKCS#7 signedData
+_OID_TSTINFO = "1.2.840.113549.1.9.16.1.4"      # id-ct-TSTInfo
+_OID_MESSAGE_DIGEST = "1.2.840.113549.1.9.4"    # messageDigest 属性
+_OID_CONTENT_TYPE = "1.2.840.113549.1.9.3"      # contentType 属性
+_OID_SHA256 = "2.16.840.1.101.3.4.2.1"
+_OID_RSA_SHA256 = "1.2.840.113549.1.1.11"       # sha256WithRSAEncryption
+_OID_ECDSA_SHA256 = "1.2.840.10045.4.3.2"       # ecdsa-with-SHA256
+
+
+def _der_read(buf: bytes, off: int = 0):
+    """读一个 DER TLV → (tag, content, next_off)。验签路径的最小解码器
+    （与上方手写 _der* 编码器同源风格：零依赖、只覆盖所需）。"""
+    tag = buf[off]
+    off += 1
+    lb = buf[off]
+    off += 1
+    if lb & 0x80:
+        n = lb & 0x7F
+        length = int.from_bytes(buf[off:off + n], "big")
+        off += n
+    else:
+        length = lb
+    return tag, buf[off:off + length], off + length
+
+
+def _der_children(content: bytes) -> List[tuple]:
+    """把一段 DER 内容字节拆成 [(tag, content), ...]。"""
+    out = []
+    off = 0
+    while off < len(content):
+        tag, c, off = _der_read(content, off)
+        out.append((tag, c))
+    return out
+
+
+def _der_oid_str(content: bytes) -> str:
+    """OID 内容字节 → 点分字符串。"""
+    first = content[0]
+    parts = [str(first // 40), str(first % 40)]
+    val = 0
+    for b in content[1:]:
+        val = (val << 7) | (b & 0x7F)
+        if not b & 0x80:
+            parts.append(str(val))
+            val = 0
+    return ".".join(parts)
+
+
+def _load_crypto():
+    """延迟导入 cryptography（拍板②：仅验签路径可用，缺失即 fail-closed）。
+
+    返回 (x509, hashes, padding, ec, rsa) 元组；ImportError → None。
+    注意：绝不在模块顶层 import——核心哈希链保持零依赖。
+    """
+    try:
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
+        return x509, hashes, padding, ec, rsa
+    except ImportError:
+        return None
+
+
+def _normalize_fingerprints(fps) -> List[str]:
+    """指纹归一：去冒号/空白、小写。输入为 str（逗号/空白分隔）或列表。"""
+    if not fps:
+        return []
+    if isinstance(fps, str):
+        fps = fps.replace(",", " ").split()
+    out = []
+    for fp in fps:
+        fp = "".join(str(fp).split()).replace(":", "").lower()
+        if fp:
+            out.append(fp)
+    return out
+
+
+def _load_trusted_fingerprints(trust_file: str = "") -> List[str]:
+    """钉扎指纹来源：env SYNC_HUB_TSA_TRUSTED_FP > JSON 配置文件。
+
+    空 = 未配置 = verify_tsa_token 一律 unverified（fail-closed，不假绿）。
+    """
+    env = os.environ.get("SYNC_HUB_TSA_TRUSTED_FP", "")
+    if env.strip():
+        return _normalize_fingerprints(env)
+    path = trust_file or os.path.join(_AUDIT_DIR, "tsa_trust.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return _normalize_fingerprints(data.get("trusted_fingerprints"))
+    except FileNotFoundError:
+        return []
+    except Exception as e:
+        logger.warning("tsa_trust 配置读取失败（按未配置 fail-closed）: %s", e)
+        return []
+
+
+def _parse_timestamp_resp(tsr: bytes) -> Dict:
+    """解析 RFC3161 TimeStampResp → {status, tstinfo, signed_attrs?, signature,
+    sig_alg, certs_der, signer_sid}。解析失败抛 ValueError。"""
+    tag, content, _ = _der_read(tsr, 0)
+    if tag != 0x30:
+        raise ValueError("TimeStampResp 顶层不是 SEQUENCE")
+    top = _der_children(content)
+    if not top or top[0][0] != 0x30:
+        raise ValueError("缺 PKIStatusInfo")
+    status_children = _der_children(top[0][1])
+    pki_status = int.from_bytes(status_children[0][1], "big") if status_children else 99
+    if pki_status > 1:
+        return {"status": pki_status}  # 2..5 = rejection（无 token 可验）
+    if len(top) < 2 or top[1][0] != 0x30:
+        raise ValueError("status=granted 但缺 timeStampToken")
+    ci = _der_children(top[1][1])  # ContentInfo
+    if _der_oid_str(ci[0][1]) != _OID_SIGNED_DATA:
+        raise ValueError("ContentInfo 不是 signedData")
+    if ci[1][0] != 0xA0:
+        raise ValueError("signedData 缺 [0] EXPLICIT")
+    tag, sd_content, _ = _der_read(ci[1][1], 0)  # [0] 内是完整 SignedData TLV
+    if tag != 0x30:
+        raise ValueError("SignedData 不是 SEQUENCE")
+    sd = _der_children(sd_content)
+    # SignedData ::= SEQUENCE { version, digestAlgorithms, encapContentInfo,
+    #                           certificates [0] IMPLICIT OPT, crls [1] OPT, signerInfos }
+    eci = _der_children(sd[2][1])  # EncapsulatedContentInfo
+    if _der_oid_str(eci[0][1]) != _OID_TSTINFO:
+        raise ValueError("eContentType 不是 id-ct-TSTInfo")
+    if len(eci) < 2 or eci[1][0] != 0xA0:
+        raise ValueError("缺 eContent（无 TSTInfo）")
+    tag, tstinfo, _ = _der_read(eci[1][1], 0)  # [0] EXPLICIT OCTET STRING
+    if tag != 0x04:
+        raise ValueError("eContent 不是 OCTET STRING")
+    certs_der: List[bytes] = []
+    signer_infos = None
+    for t, c in sd[3:]:
+        if t == 0xA0:  # certificates [0] IMPLICIT：内容为证书 TLV 拼接
+            off = 0
+            while off < len(c):
+                ct, cc, nxt = _der_read(c, off)
+                if ct == 0x30:
+                    certs_der.append(c[off:nxt])
+                off = nxt
+        elif t == 0x31:  # signerInfos SET
+            signer_infos = c
+    if not signer_infos:
+        raise ValueError("缺 signerInfos")
+    tag, si_content, _ = _der_read(signer_infos, 0)  # 取第一个 SignerInfo
+    if tag != 0x30:
+        raise ValueError("SignerInfo 不是 SEQUENCE")
+    si = _der_children(si_content)
+    # SignerInfo ::= SEQUENCE { version, sid, digestAlgorithm, signedAttrs [0] OPT,
+    #                           signatureAlgorithm, signature }
+    signed_attrs = None
+    sig_alg = None
+    signature = None
+    for t, c in si[2:]:
+        if t == 0xA0:
+            signed_attrs = c
+        elif t == 0x30:
+            algid = _der_children(c)
+            oid = _der_oid_str(algid[0][1])
+            if sig_alg is None and oid in (_OID_SHA256,):
+                continue  # digestAlgorithm
+            sig_alg = oid if oid != _OID_SHA256 else sig_alg
+        elif t == 0x04:
+            signature = c
+    if not sig_alg or signature is None:
+        raise ValueError("缺 signatureAlgorithm 或 signature")
+    return {"status": pki_status, "tstinfo": tstinfo, "signed_attrs": signed_attrs,
+            "sig_alg": sig_alg, "signature": signature, "certs_der": certs_der}
+
+
+def _parse_tstinfo(tstinfo: bytes) -> Dict:
+    """解析 TSTInfo → {imprint, gen_time}。messageImprint 摘要是回拉比对的锚。"""
+    tag, content, _ = _der_read(tstinfo, 0)
+    if tag != 0x30:
+        raise ValueError("TSTInfo 不是 SEQUENCE")
+    ch = _der_children(content)
+    # version, policy, messageImprint, serialNumber, genTime, ...
+    mi = _der_children(ch[2][1])  # MessageImprint SEQUENCE
+    imprint = mi[1][1]            # OCTET STRING 内容
+    gen_raw = ch[4][1].decode("ascii")  # GeneralizedTime YYYYMMDDHHMMSSZ
+    gen_time = datetime.strptime(gen_raw, "%Y%m%d%H%M%SZ").replace(tzinfo=timezone.utc)
+    return {"imprint": imprint, "gen_time": gen_time}
+
+
+def _verify_signature(crypto, cert, sig_alg: str, signature: bytes, data: bytes) -> bool:
+    """用证书公钥验签（RSA PKCS#1 v1.5 / ECDSA，摘要固定 SHA-256）。"""
+    _, hashes, padding, ec, _ = crypto
+    try:
+        pub = cert.public_key()
+        if sig_alg == _OID_RSA_SHA256:
+            pub.verify(signature, data, padding.PKCS1v15(), hashes.SHA256())
+        elif sig_alg == _OID_ECDSA_SHA256:
+            pub.verify(signature, data, ec.ECDSA(hashes.SHA256()))
+        else:
+            return False
+        return True
+    except Exception:
+        return False
+
+
+def _cert_signed_by(crypto, cert, issuer) -> bool:
+    """cert 的签名是否由 issuer 公钥验证通过（RSA/ECDSA）。"""
+    _, _, padding, ec, rsa = crypto
+    try:
+        pub = issuer.public_key()
+        alg = cert.signature_hash_algorithm
+        if isinstance(pub, rsa.RSAPublicKey):
+            pub.verify(cert.signature, cert.tbs_certificate_bytes,
+                       padding.PKCS1v15(), alg)
+        else:
+            pub.verify(cert.signature, cert.tbs_certificate_bytes,
+                       ec.ECDSA(alg))
+        return True
+    except Exception:
+        return False
+
+
+def verify_tsa_token(tsr, chain_head: str, trusted_fingerprints=None,
+                     trust_file: str = "") -> Dict:
+    """RFC 3161 TimeStampResp 离线验签 + 指纹钉扎比对。
+
+    tsr：token 字节或 .tsr 文件路径。chain_head：待比对的主链链头 hash（hex）。
+    trusted_fingerprints：None = 走配置（env > audit/tsa_trust.json）；
+    显式列表（含空列表）优先于配置——空列表 = 未配置 = fail-closed unverified。
+
+    返回 {"status": "verified" | "failed" | "unverified", ...}：
+    - verified：签名有效 + imprint == SHA256(chain_head) + 指纹命中钉扎
+      （TSA 签名证书指纹直接命中，或证书链闭合到已钉扎的 CA）
+    - failed：能验但不过（摘要被篡改 / 签名无效 / 指纹不匹配）——安全事件
+    - unverified：无法验（缺 cryptography / 未配指纹）——不假绿、明确报出
+    """
+    crypto = _load_crypto()
+    if crypto is None:
+        return {"status": "unverified", "reason": "cryptography_unavailable",
+                "detail": "验签依赖 cryptography 未安装；核心哈希链不受影响（零依赖）"}
+    pins = set(_normalize_fingerprints(trusted_fingerprints)
+               if trusted_fingerprints is not None
+               else _load_trusted_fingerprints(trust_file))
+    if not pins:
+        return {"status": "unverified", "reason": "no_trusted_fingerprints",
+                "detail": "未配置钉扎指纹（SYNC_HUB_TSA_TRUSTED_FP 或 "
+                          "audit/tsa_trust.json）——不钉则验签等于白验，拒绝假绿"}
+    if isinstance(tsr, str):
+        with open(tsr, "rb") as f:
+            tsr = f.read()
+    try:
+        parsed = _parse_timestamp_resp(tsr)
+    except (ValueError, IndexError, UnicodeDecodeError) as e:
+        return {"status": "failed", "reason": "malformed_token", "detail": str(e)[:200]}
+    if "tstinfo" not in parsed:
+        return {"status": "failed", "reason": "tsa_rejected",
+                "detail": f"PKIStatus={parsed['status']}（TSA 拒绝了该请求）"}
+    try:
+        info = _parse_tstinfo(parsed["tstinfo"])
+    except (ValueError, IndexError, UnicodeDecodeError) as e:
+        return {"status": "failed", "reason": "malformed_tstinfo", "detail": str(e)[:200]}
+    base: Dict = {"gen_time": info["gen_time"].isoformat(),
+                  "imprint": info["imprint"].hex()}
+    # ① 消息摘要比对：token 盖的必须是当前链头
+    expected = hashlib.sha256(chain_head.encode("utf-8")).digest()
+    if info["imprint"] != expected:
+        return {**base, "status": "failed", "reason": "imprint_mismatch",
+                "detail": "token 内的 messageImprint 与链头摘要不符（摘要被篡改/张冠李戴）"}
+    x509, hashes = crypto[0], crypto[1]
+    try:
+        certs = [x509.load_der_x509_certificate(d) for d in parsed["certs_der"]]
+    except Exception as e:
+        return {**base, "status": "failed", "reason": "bad_certificates",
+                "detail": str(e)[:200]}
+    if not certs:
+        return {**base, "status": "failed", "reason": "no_certificates",
+                "detail": "token 未携带证书（无法验签）"}
+    # ② 签名验证：signedAttrs 在场时签的是 SET OF(tag 0x31) 的 DER，
+    #    且其 messageDigest 属性必须 == SHA256(TSTInfo)；否则签 TSTInfo 本体。
+    if parsed["signed_attrs"] is not None:
+        attrs = parsed["signed_attrs"]
+        md_ok = False
+        for t, c in _der_children(attrs):
+            if t != 0x30:
+                continue
+            attr = _der_children(c)
+            if _der_oid_str(attr[0][1]) == _OID_MESSAGE_DIGEST:
+                vals = _der_children(attr[1][1])
+                if vals and vals[0][1] == hashlib.sha256(parsed["tstinfo"]).digest():
+                    md_ok = True
+        if not md_ok:
+            return {**base, "status": "failed", "reason": "message_digest_mismatch",
+                    "detail": "signedAttrs 的 messageDigest 与 TSTInfo 摘要不符"}
+        sign_input = _der(0x31, attrs)
+    else:
+        sign_input = parsed["tstinfo"]
+    signer = next((c for c in certs
+                   if _verify_signature(crypto, c, parsed["sig_alg"],
+                                        parsed["signature"], sign_input)), None)
+    if signer is None:
+        return {**base, "status": "failed", "reason": "signature_invalid",
+                "detail": "所有附带证书均无法验证签名"}
+    base["tsa_cert_subject"] = signer.subject.rfc4514_string()
+    # 签名证书在盖章时刻必须有效
+    if not (signer.not_valid_before_utc <= info["gen_time"]
+            <= signer.not_valid_after_utc):
+        return {**base, "status": "failed", "reason": "cert_not_valid_at_gen_time",
+                "detail": "签名证书在 genTime 时刻不在有效期内"}
+    signer_fp = signer.fingerprint(hashes.SHA256()).hex()
+    # ③ 指纹钉扎：TSA 签名证书直接命中 → 通过（私有 TSA 常为自签，不要求成链）
+    if signer_fp in pins:
+        return {**base, "status": "verified", "pinned": "tsa_cert",
+                "fingerprint": signer_fp}
+    # 否则要求证书链闭合到某个已钉扎 CA
+    path, chain_ok = [signer], True
+    cur = signer
+    while cur.issuer != cur.subject:
+        cur_fp = cur.fingerprint(hashes.SHA256())
+        issuer = next(
+            (c for c in certs if c.subject == cur.issuer
+             and c.fingerprint(hashes.SHA256()) != cur_fp),
+            None)
+        if issuer is None or not _cert_signed_by(crypto, cur, issuer):
+            chain_ok = False
+            break
+        path.append(issuer)
+        cur = issuer
+    if chain_ok and not _cert_signed_by(crypto, cur, cur):
+        chain_ok = False  # 自签根的自签名验证失败
+    if chain_ok:
+        for ca in path[1:]:
+            ca_fp = ca.fingerprint(hashes.SHA256()).hex()
+            if ca_fp in pins:
+                return {**base, "status": "verified", "pinned": "trusted_ca",
+                        "fingerprint": ca_fp,
+                        "chain_subjects": [c.subject.rfc4514_string() for c in path]}
+    return {**base, "status": "failed", "reason": "fingerprint_not_pinned",
+            "detail": "签名证书及链上 CA 指纹均未命中钉扎列表"
+                      + ("" if chain_ok else "（且证书链未闭合）"),
+            "fingerprint": signer_fp}
+
+
+def _validate_anchor_url(url: str, allow_private: bool = True) -> Optional[str]:
+    """SSRF 防护：仅 http/https、禁 userinfo。返回 None=合法，否则拒绝原因。
+
+    内网保留段默认**放宽**（allow_private=True）：本产品是内网部署，
+    锚接收方典型就是同网段的审计服务器（如 http://192.168.x.x/anchor），
+    一刀切拒绝内网段会让默认部署不可用；URL 本身来自管理员配置
+    （AUDIT_ANCHOR_URLS），非用户输入，SSRF 攻击面有限。
+    若部署面变化（如 URL 来自低权角色），置 env SYNC_HUB_ANCHOR_ALLOW_PRIVATE=0
+    收紧：拒绝私网/环回/链路本地/保留/组播/未指定地址（域名放行——离线无法
+    判定解析结果，收紧到该粒度需要解析后校验，代价不值得）。
+    """
+    from urllib.parse import urlparse
+    p = urlparse(url)
+    if p.scheme not in ("http", "https"):
+        return f"scheme 不允许: {p.scheme!r}（仅 http/https）"
+    if not p.hostname:
+        return "缺少主机名"
+    if p.username or p.password:
+        return "URL 不允许携带 userinfo（防凭据泄漏/混淆）"
+    if not allow_private:
+        import ipaddress
+        try:
+            ip = ipaddress.ip_address(p.hostname)
+        except ValueError:
+            return None  # 域名：离线无法判定，放行（见 docstring）
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified):
+            return f"内网/保留地址被拒绝（allow_private=False）: {p.hostname}"
+    return None
+
+
+def fetch_and_verify_anchors(db_path: str, urls: Optional[List[str]] = None,
+                             timeout: int = 5,
+                             allow_private: Optional[bool] = None) -> Dict:
+    """从 AUDIT_ANCHOR_URLS 取回远端锚，与本地主链比对（XS-004 的取回半环）。
+
+    语义（与 verify_tsa 同判据）：链头随写入变化，故判据不是「远端锚 == 当前
+    链头」，而是「远端锚节点仍存在于链中」——在链中即该锚时刻之后未被整段
+    重写。远端应答格式：JSON {"anchor": "<hex>"}，或纯文本「... <hex>」末词
+    （兼容 anchor.txt 快照格式）。
+    返回 {"valid", "checked", "unverified", "results"}：
+    - valid=False 仅当某个成功取回的锚不在链中（重写嫌疑，安全事件）
+    - 取不回（网络/格式）记 unverified 计数、不判 valid=False——取不回不是
+      篡改证据，但也不构成确认，运维应按 unverified>0 告警
+    """
+    if urls is None:
+        from models import CONFIG  # 函数内 import 防循环依赖
+        urls = getattr(CONFIG, "AUDIT_ANCHOR_URLS", []) or []
+    if allow_private is None:
+        allow_private = os.environ.get("SYNC_HUB_ANCHOR_ALLOW_PRIVATE", "1") != "0"
+    if not urls:
+        return {"valid": True, "checked": 0, "unverified": 0, "results": [],
+                "note": "未配置远端锚 URL（AUDIT_ANCHOR_URLS 默认空 = 休眠）"}
+    head = current_chain_head(db_path)
+    try:
+        conn = _conn(db_path)
+    except Exception as e:
+        return {"valid": False, "checked": 0, "unverified": len(urls),
+                "results": [], "error": f"db_unavailable: {str(e)[:200]}"}
+    results: List[Dict] = []
+    checked = unverified = 0
+    valid = True
+    try:
+        for url in urls:
+            rec: Dict = {"url": url}
+            results.append(rec)
+            reason = _validate_anchor_url(url, allow_private)
+            if reason:
+                rec.update(ok=False, status="rejected", reason=reason)
+                unverified += 1
+                continue
+            try:
+                req = urllib.request.Request(url, method="GET")
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read(65536)  # 锚应答应是几百字节，截断防异常大响应
+            except Exception as e:
+                rec.update(ok=False, status="unverified",
+                           reason=f"fetch_failed: {type(e).__name__}: {e}"[:200])
+                unverified += 1
+                continue
+            anchor = ""
+            try:
+                anchor = str(json.loads(raw.decode("utf-8")).get("anchor") or "")
+            except Exception:
+                text = raw.decode("utf-8", errors="replace").strip()
+                anchor = text.split()[-1] if text else ""
+            rec["anchor"] = anchor[:16]
+            if not anchor:
+                rec.update(ok=False, status="unverified",
+                           reason="应答中解析不到 anchor 字段")
+                unverified += 1
+                continue
+            checked += 1
+            if anchor == head:
+                rec.update(ok=True, status="match_head")
+            else:
+                hit = conn.execute(
+                    "SELECT log_id FROM audit_log WHERE entry_hash = ? LIMIT 1",
+                    (anchor,)).fetchone()
+                if hit:
+                    rec.update(ok=True, status="match_chain", log_id=hit["log_id"])
+                else:
+                    rec.update(ok=False, status="mismatch",
+                               reason="远端锚不在本地链中（链被整段重写/截断嫌疑）")
+                    valid = False
+    finally:
+        conn.close()
+    return {"valid": valid, "checked": checked, "unverified": unverified,
+            "chain_head": head[:16] if head else head, "results": results}
+
+
 def verify_all(db_path: str, jsonl_files: Dict[str, str],
                start_id: int = 0, end_id: int = 0) -> Dict:
     """综合校验：audit_log 主链 + disclosure_log 披露链 + jsonl 滚动链。"""

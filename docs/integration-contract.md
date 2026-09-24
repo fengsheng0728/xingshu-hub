@@ -80,6 +80,7 @@ python hub_cli.py key create --agent ext-partner-a \
 | scoped key 且 `scope.ws ≠ true` | `close 4401 Forbidden: scoped key cannot open WS` |
 
 `/ws/dashboard`、`/ws/buffer` 另有特权门（须 hub_token 或 `manager`/`orchestrator`）。
+讨论室两条通道（`/ws/shared/watch/{doc_id}`、`/ws/shared/{doc_id}`）同此首帧鉴权——scoped key 未开 `scope.ws` 同样 4401；两条怎么选见 §3.4。
 
 ---
 
@@ -106,6 +107,53 @@ python hub_cli.py key create --agent ext-partner-a \
 > （`hub_core.record_pong` 是唯一入口）。**想被派单就必须保持在线**——离线 Agent 拿不到 `dispatch`，
 > 错过的事件在通知侧记为 `missed_runs`。心跳间隔建议 30s（与 `L5-TIMEOUT-001` 的 90s 判定配套）。
 
+### 2.1 接入子集的最低权限对照（CD-079c）
+
+> 本小节为增量补充。**最低凭据**＝能调通该端点的最低级别身份；「受限 key」指 §1 路径 B 签发的 scoped key
+>（还需 `endpoints`/`methods` 白名单命中）；「配对凭据」指 `team_members.remote_api_key`（见本小节末尾说明）。
+
+| 端点 | 最低凭据 | 说明 |
+|---|---|---|
+| `POST /api/v1/memory/store` | 本人 api_key | `routes_memory.api_memory_store`：`current_agent != agent_id` 即 403 |
+| `POST /api/v1/memory/search` | 本人 api_key | `routes_memory.api_memory_search`：`current_agent != req.agent_id` 即 403 |
+| `POST /api/v1/memory/disclose` | 本人 api_key | `routes_memory.api_disclose`：`current_agent != req.requester_agent_id` 即 403 |
+| `POST /api/v1/memory/semantic_search` | 本人 api_key | `routes_memory.api_semantic_search`：同上 |
+| `POST /api/v1/knowledge` | manager / orchestrator / hub_token | `routes_knowledge.api_knowledge_upsert`：`require_role` roles=("manager","orchestrator") |
+| `GET /api/v1/knowledge` | 本人 api_key | `routes_knowledge.api_knowledge_list`：`get_current_agent`，正文按披露规则剥离 |
+| `GET /api/v1/knowledge/{entry_id}` | 本人 api_key | `routes_knowledge.api_knowledge_get`：同上 |
+| `GET /api/v1/wiki/pages` | 本人 api_key | `routes_wiki.api_wiki_pages`：`get_current_agent`；`principal_is_privileged` 影响可见范围 |
+| `GET /api/v1/wiki/export` | 配对凭据 或 manager / orchestrator / hub_token | `routes_wiki.api_wiki_export`：路由层豁免 + `authorize_federated_caller` 双通道自认证 |
+| `POST /api/v1/wiki/import` | 配对凭据 或 manager / orchestrator / hub_token | `routes_wiki.api_wiki_import`：同 export |
+| `GET /api/v1/wiki/inbox` | manager / orchestrator / hub_token | `routes_wiki.api_wiki_inbox`：`require_ops_privilege` |
+| `GET /api/v1/shared/docs` | 本人 api_key | `routes_shared.api_shared_list`：`get_current_agent` |
+| `POST /api/v1/shared/docs` | 本人 api_key | `routes_shared.api_shared_create`：`get_current_agent` |
+| `GET /api/v1/shared/docs/{doc_id}` | 本人 api_key | `routes_shared.api_shared_get`：披露级别门 + `_log_deny` 留痕 |
+| `GET /api/v1/team/members` | 本人 api_key | `routes_team.api_team_members`：`get_current_agent` |
+| `GET /api/v1/team/discover` | 本人 api_key | `routes_team.api_team_discover`：`get_current_agent` |
+| `GET /api/v1/team/ping` | 本人 api_key | `routes_team.api_team_ping`：`get_current_agent` |
+| `POST /api/v1/team/pair/exchange` | 6 位配对码 | `routes_team.api_team_pair_exchange`：免标准认证，函数内用请求体 `code` 自认证 + IP 指数退避 |
+| `POST /api/v1/team/proxy/disclose` | 配对凭据 | `routes_team.api_team_proxy_disclose`：免标准认证，函数内查 `team_members` 表自认证 |
+| `GET /api/v1/federation/snapshot/{kind}` | 配对凭据 或 manager / orchestrator / hub_token | `routes_federation.api_snapshot`：路由层豁免 + `authorize_federated_caller` |
+| `POST /api/v1/federation/pull` | manager / orchestrator / hub_token | `routes_federation.api_pull`：**不豁免**，走标准认证 + `require_role` |
+| `GET /api/audit/reads` | manager / orchestrator / hub_token | `routes_audit.api_audit_reads`：`require_role`（canonical 角色门） |
+| `GET /api/audit/events` | manager / orchestrator / hub_token | `routes_audit.api_audit_events`：同上 |
+| `POST /api/audit/anchor/stamp` | manager / orchestrator / hub_token | `routes_audit.api_audit_anchor_stamp`：`require_ops_privilege` |
+| `GET /api/v1/stats` | 本人 api_key | `routes_dashboard.api_stats`：`get_current_agent` |
+| `GET /health` | 无需凭据 | `routes_server.api_health`：在 `AUTH_ALLOWLIST_PATHS` 里 |
+| `GET /metrics` | 无需凭据 | `routes_server.api_metrics`：在 `AUTH_ALLOWLIST_PATHS` 里 |
+
+**配对凭据的有效范围**（最容易混淆的一点）：配对凭据（`team_members.remote_api_key`）只对「路由层豁免 + 端点函数内自认证」的端点有效，已核实共 **4 条**：
+
+1. `POST /api/v1/team/proxy/disclose` —— `routes_team.api_team_proxy_disclose` 函数内查 `team_members` 表
+2. `GET /api/v1/federation/snapshot/{kind}` —— `routes_federation.api_snapshot` 经 `authorize_federated_caller`
+3. `GET /api/v1/wiki/export` —— `routes_wiki.api_wiki_export` 经 `authorize_federated_caller`
+4. `POST /api/v1/wiki/import` —— `routes_wiki.api_wiki_import` 经 `authorize_federated_caller`
+
+**不在配对凭据有效范围内的两条**（务必区分）：
+
+- `POST /api/v1/federation/pull` **不豁免**——走标准认证 + `require_role`（manager/orchestrator/hub_token）；配对凭据不在 `agents`/`agent_keys` 表里，过不了 `get_current_agent`。
+- `POST /api/v1/team/pair/exchange` 用的是 **6 位配对码**（请求体 `code` 字段），**不是** `remote_api_key`——这是配对握手协议的入口，不是配对凭据的使用端点。
+
 ---
 
 ## 3. WebSocket 协议（实时通道）
@@ -131,7 +179,7 @@ python hub_cli.py key create --agent ext-partner-a \
 | `hello` | `{"agent_id": "...", "last_checkpoint_id": "...", "agent_version": "1.2.3"}` | 上线握手；`last_checkpoint_id` 触发**未确认派单重放**；`agent_version` 低于 `AGENT_MIN_VERSION`（默认 `1.0.0`）→ `close 426` 拒连 |
 | `ping` / `pong` | `{}` | 心跳（间隔 30s；`pong` 超时 90s 才判半开 → 最长 90s 才发现真断线，见 L5-TIMEOUT-001） |
 | `ack` | `{"dispatch_id": "<派单帧 id>"}` | 确认派单已收到（Hub 据此 `dec_in_flight`） |
-| `request` | `{"method": "memory_search\|memory_store\|memory_list", "params": {...}}` | WS 上的同步请求，Hub 回 `response`。⚠️ **`memory_search` 目前恒返回 `{"error":"'SyncHub' object has no attribute 'search_memory'"}`**（CD-091，已登记待修）；`memory_list` / `memory_store` 实测可用 |
+| `request` | `{"method": "memory_search\|memory_store\|memory_list", "params": {...}}` | WS 上的同步请求，Hub 回 `response`。`memory_search` 的 params：`{"query": "...", "limit": 10}`（`limit` 映射 `top_k`；可选 `kind`/`top_k`/`min_confidence`），`result` 与 REST `/memory/search` 同构（`results`/`total`/`degraded` 等，CD-091 已修）；`memory_list` / `memory_store` 实测可用 |
 
 ### 3.3 Hub → 客户端
 
@@ -146,6 +194,36 @@ python hub_cli.py key create --agent ext-partner-a \
 | 平铺：缓冲统计 | 每秒一个 JSON | 仅 `/ws/buffer`（特权通道） |
 
 > **接入方必须按 `type` 分发，不要假设每一帧都是 envelope**——目前两类形态并存（这是**现状**，不是建议）。
+
+### 3.4 接入讨论室（共享文档的两条 WS 通道）
+
+同一个 `doc_id` 有两条 WS 端点，**按你要不要「参与编辑」来选**：
+
+| 端点 | 形态 | 适用 |
+|---|---|---|
+| `/ws/shared/watch/{doc_id}` | **纯 JSON 文本事件流**（只收不发，keepalive 随意发文本帧即可） | **外部接入首选**：订阅动态、机器人旁听、Webhook 前的实时触发源 |
+| `/ws/shared/{doc_id}` | **pycrdt 二进制协作通道**（YRoom，y-protocol 同步 + awareness 帧） | 要**参与 CRDT 协同编辑**的客户端（需 pycrdt/yjs 协议栈，不要手写解析） |
+
+**鉴权（两条通道同一套，见 §1「WebSocket 认证」）**：连上后首帧 `{"type":"auth","token":"..."}`，
+超 `WS_AUTH_TIMEOUT_SEC`（默认 3s）不发 / 令牌无效 → `close 4401`（失败按 IP 计数熔断）。
+**scoped key 必须 `scope.ws = true` 才放行**（CD-069 口径：fail-closed，未声明一律 `close 4401`）。
+watch 通道鉴权后的身份：api_key → key 归属 agent；hub_token → 取 `?agent_id=` 声明，缺省记为 `__anon__`。
+
+**watch 通道事件形态**（每帧都是单个 JSON 对象，按 `type` 分发；除 `shared_archived` 外
+广播事件都会附加 `online: [agent_id...]` 在线协作者列表）：
+
+| type | 字段 | 何时 |
+|---|---|---|
+| `shared_presence` | `doc_id`、`agent_id`、`joined: true\|false` | 有 watcher 加入/离开该文档 |
+| `shared_update` | `doc_id`、`agent_id`、`preview`（新 block 前 100 字） | 有人经 REST `POST /shared/docs/{doc_id}/blocks` 追加内容 |
+| `shared_archived` | `doc_id`、`reason: "doc archived"` | 文档被归档（讨论结束）——**收此帧后通道随即 `close 4404`**；归档后再进房也是先收此帧再被 4404 关掉 |
+
+**二进制通道补充**：文档已归档 → 同样先送一帧 JSON `shared_archived` 再 `close 4404`；
+工作区未就绪 → `close 4000`。
+
+**重连与追平**：两条通道都**没有断线重放**——事件不补发、无 checkpoint 语义。
+重连 = 重新建连 + 重发首帧 auth；错过内容用 REST `GET /api/v1/shared/docs/{doc_id}` 拉全文追平。
+注意 `4401` 失败有计数熔断（§4），重连要退避，不要死循环猛连；批量建连遵守 §5.1 的分批口径。
 
 ---
 
@@ -232,3 +310,41 @@ python hub_cli.py key create --agent ext-partner-a \
   3. 面向接入方的**错误码表枚举**（现在只有状态码层语义，业务错误码尚未收敛成稳定枚举）。
 - 接入方如果发现本文与实测不符：以**实测 + `/openapi.json`** 为准，并把差异反馈给我们——
   本文是契约不是承诺，**改它比让接入方猜便宜**。
+
+---
+
+## 10. 集成方最容易踩的坑（CD-079c）
+
+> 本节为增量补充。每条格式：**现象 → 为什么 → 怎么避**。全部有代码判定点依据。
+
+1. **受限 key 的 `endpoints` 写 /api/v1/shared 会被拒，写 /shared 才通**
+   → 为什么：`routes._endpoint_allowed` 的匹配规则是「请求路径归一剥离 /api/v1 前缀后与条目做精确 + 边界比对」，不是裸前缀匹配（/mem 不会放行 /memory/*，详见 §1 路径 B 表格「endpoints」行）。
+   → 怎么避：`endpoints` 里写不带 /api/v1 前缀的路径段；写错了会被 `scoped key: endpoint 不在白名单` 403 拒掉。
+
+2. **payload 里出现 `type`/`id`/`session_id`/`via`/`ts`/`version` 会被静默丢帧**
+   → 为什么：`envelope.RESERVED_PAYLOAD_KEYS` 是信封保留键集合（= 信封字段减 `payload`）；构造时 `_build` 抛 `ValueError`，解析时 `parse_envelope` 返 `None`（整帧丢弃，无错误回报）。
+   → 怎么避：业务字段一律放 `payload` 内且避开这 6 个键名；收到无响应时先自查帧结构。
+
+3. **WS 连上后发 query 参数 token 不会生效，错令牌是 `close 4401`**
+   → 为什么：WS 认证是**首帧** `{"type":"auth","token":"..."}`（`routes_ws._ws_auth_accept`），不是 URL query 参数；错令牌/空 token/首帧不是 auth 帧一律 `close 4401`。
+   → 怎么避：连上后立刻发 auth 帧；超 `WS_AUTH_TIMEOUT_SEC`（默认 3s）也是 `close 4401`，别等。
+
+4. **请求体超限返回 413，不是 400**
+   → 为什么：`routes._send_413` 在中间件层拦截超限请求体（默认 2MB；`BODY_LIMIT_LARGE_PATHS` 里的端点——`/api/v1/hub-agent/chat` 与 `/api/v1/wiki/import`——8MB）；400 是参数/请求体**不合法**（CD-101 口径）。
+   → 怎么避：把 413 当「太大」处理（拆包/压缩），把 400 当「格式错」处理（修请求）；两者重试策略不同。
+
+5. **/health /metrics 与静态/页面壳免认证且免限速；免认证的联邦端点仍参与限速；POST /api/v1/team/proxy/disclose 免认证且免限速**
+   → 为什么：`routes.py` 中间件对 `AUTH_ALLOWLIST_PREFIXES`/`AUTH_ALLOWLIST_PATHS` 跳过认证；限速参与判定是 `path.startswith(RATE_LIMITED_ALLOWLIST)` **或**「不在豁免名单里」。`RATE_LIMITED_ALLOWLIST` 含 4 条（CD-117 收口）：/api/v1/wiki/import、/api/v1/wiki/export、/api/v1/federation/snapshot、/api/v1/team/pair/exchange——这 4 条虽免认证但**仍参与每 IP 限速**。/health /metrics /static /docs 等不在 `RATE_LIMITED_ALLOWLIST` 里 → 免限速。POST /api/v1/team/proxy/disclose 在 `AUTH_ALLOWLIST_PATHS` 里但**不在** `RATE_LIMITED_ALLOWLIST` 里 → **免认证且免限速**。
+   → 怎么避：对限速敏感的联邦调用（wiki import/export、federation snapshot、pair exchange）做好 429 退避；/health /metrics 可放心高频探测；不要拿 proxy/disclose 当压测入口。
+
+6. **幂等责任在接入方——同一个 `dispatch` 帧可能被处理两次**
+   → 为什么：Hub 在 `hello` 时按 `last_checkpoint_id` 重放未确认派单；未 `ack` 的派单重连后可能再次下发（详见 §6）。
+   → 怎么避：按派单 `id`（即 `dispatch_id`）去重，或让业务操作本身幂等。
+
+7. **`/tasks/{id}/{start,complete,fail,cancel}` 缺 `?agent_id=<自己>` 是 422，不是 403**
+   → 为什么：`agent_id` 是 FastAPI 必填 query 参数（`routes_tasks` 的 `api_task_start` 等签名），缺失走参数校验 → 422；403 是「参数齐了但越权」。
+   → 怎么避：状态推进类请求一律带 `?agent_id=<自己的 agent_id>`；收到 422 先查参数，收到 403 再查权限。
+
+8. **OTel trace 默认关闭——不要以为调了就会有 span**
+   → 为什么：`tracing.py` 可选依赖，未装即 no-op；需设 `SYNC_HUB_LLM_TRACE=1` 或 `OTEL_EXPORTER_OTLP_ENDPOINT` 才启用（CD-085c 口径）。
+   → 怎么避：需要 trace 时确认环境变量已设 + 依赖已装，否则静默无数据。

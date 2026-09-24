@@ -42,6 +42,25 @@ def _level_rank(level: "DisclosureLevel") -> int:
     }.get(level, 0)
 
 
+# CD-094（2026-09-23，方案①已拍板）：共享文档纳入披露判定。
+# shared_docs 不加列——复用既有 trust_level（S3 溯源列：system/internal/
+# federated/external，取值定义见 models.py 的 MemoryEntry.trust_level 注释）作为**文档侧密级上限**；未知值 fail-closed
+# 到 METADATA（宁可剥多不可泄露）。
+SHARED_DOC_TRUST_CAP = {
+    "system": DisclosureLevel.FULL,
+    "internal": DisclosureLevel.FULL,
+    "trusted": DisclosureLevel.FULL,
+    "federated": DisclosureLevel.SUMMARY,
+    "external": DisclosureLevel.METADATA,
+    "untrusted": DisclosureLevel.NONE,
+}
+
+# CD-100（2026-09-23）：search_chunks 默认 fail-closed 的哨兵——区分
+# 「调用方没传 scope」（进程内直调，未声明主体上下文 → 封顶 metadata）
+# 与「显式传 None」（普通 api_key 主体，无 scoped cap → 行为同修复前）。
+_SCOPE_UNSET = object()
+
+
 class DisclosureEngine:
     """渐进式披露引擎 — 封装披露决策逻辑，从 SyncHub 解耦"""
 
@@ -192,7 +211,10 @@ class DisclosureEngine:
             if policy.get("allow_peer_disclosure", True):
                 assigned = task.get("assigned_agent_id", "")
                 creator = task.get("creator_agent_id", "")
-                if requester in (assigned, creator) or owner in (assigned, creator):
+                # 语义收紧（修复轮）：仅「请求方本人参与任务」放行；删去
+                # owner in (assigned, creator) 半条件——否则任意 worker 拿一个
+                # 受害者参与过的 task_id 即可读其记忆 SUMMARY（归属伪造面）。
+                if requester in (assigned, creator):
                     return DisclosureLevel.SUMMARY
             # r4_published_public（CD-033A 2026-09-17）：已发布内容链尾提升 NONE→SUMMARY。
             # 必须是"提升"而非覆盖：上方所有早退分支（r1 自己/r2 白名单/r2b 组交集/
@@ -299,10 +321,13 @@ class DisclosureEngine:
     def _extract_by_level(self, memory: dict, level: DisclosureLevel) -> str:
         """按披露级别提取内容"""
         if level == DisclosureLevel.METADATA:
+            # CD-100：metadata 抽取对 chunk 行也必须成立——document_chunks 无
+            # importance/access_count 列（fail-closed 封顶后这里首次被 chunk 命中），
+            # 一律 .get 默认值，缺列不再 KeyError（泄露面不能有崩溃旁路）。
             return json.dumps({
                 "tags": json.loads(memory.get("tags") or "[]"),
-                "importance": memory["importance"],
-                "created_at": memory["created_at"],
+                "importance": memory.get("importance", 0),
+                "created_at": memory.get("created_at", ""),
                 "access_count": memory.get("access_count", 0),
             }, ensure_ascii=False)
         elif level == DisclosureLevel.SUMMARY:
@@ -311,6 +336,50 @@ class DisclosureEngine:
             return memory["content"]
         else:
             return ""
+
+    def shared_doc_level(self, doc: dict, requester: str, scope: dict = None,
+                         principal_known: bool = True) -> DisclosureLevel:
+        """CD-094（方案①）：共享文档披露级别 = min(主体判定, 文档密级[trust_level 映射])。
+
+        doc: shared_docs 行 dict（至少含 created_by/visibility/allowed_agents/trust_level）。
+        主体判定 = 8 规则链（含 scope level_cap/data_domain 叠加），伪 memory 构造口径：
+        - disclosure_level 恒 "full"——shared_docs 无此列，文档侧上限由 trust_level
+          单独表达（走下方 min），不重复进规则链；
+        - allowed_viewers ← allowed_agents（private 白名单命中规则2 → FULL）；
+        - published ← visibility != "private"（team 文档 = 团队内已发布内容，
+          走 r4_published_public 链尾提升 NONE→SUMMARY——团队读物对注册主体
+          保底摘要级，与知识层「企业已发布」同一口径）。
+        scope 语义与 disclose_for_principal 一致：scoped key 的 level_cap /
+        data_domain 在共享文档读出口同样生效（修复前 level_cap 形同虚设）。
+        principal_known=False（NO_AUTH 开发态，principal=None 无身份语义）：
+        主体侧不判定、按 FULL 起算，但文档密级（数据自身属性）仍然生效——
+        external/untrusted 文档在开发态也不许整文漏出 REST。
+        """
+        if principal_known:
+            pseudo = {
+                "owner_agent_id": doc.get("created_by") or "",
+                "disclosure_level": "full",
+                "allowed_viewers": doc.get("allowed_agents") or "[]",
+                "tags": "[]",
+                "importance": 0,
+                "created_at": doc.get("created_at") or "",
+                "content": "",
+                "summary": "",
+                "published": (doc.get("visibility") or "team") != "private",
+            }
+            lv = self.disclose_for_principal(
+                memory=pseudo, requester=requester, task={},
+                required_level=DisclosureLevel.FULL, scope=scope,
+            )
+        else:
+            lv = DisclosureLevel.FULL
+        cap = SHARED_DOC_TRUST_CAP.get(
+            (doc.get("trust_level") or "internal").strip().lower(),
+            DisclosureLevel.METADATA,  # 未知密级 fail-closed
+        )
+        if _level_rank(lv) > _level_rank(cap):
+            lv = cap
+        return lv
 
     # ── 按需披露请求 ──
 
@@ -397,8 +466,33 @@ class DisclosureEngine:
 
     # ── 语义搜索 ──
 
-    async def semantic_search(self, req: SemanticSearchRequest, scope: dict = None) -> dict:
-        """CD-043：计时 + 降级计数包装（供 /api/v1/stats 观测）。"""
+    async def semantic_search(self, req: SemanticSearchRequest, scope=_SCOPE_UNSET,
+                              internal: bool = False) -> dict:
+        """CD-043：计时 + 降级计数包装（供 /api/v1/stats 观测）。
+
+        scope 语义（CD-105，2026-09-24，fail-closed 收口——对齐 CD-100
+        search_chunks 范式。修复前 scope 默认 None，语义等于「普通 api_key
+        主体、无 scoped cap」，进程内直调（不走 HTTP 路由、不注入 scope）
+        fail-open 不受任何级别封顶）：
+        - **未传**（默认 _SCOPE_UNSET 哨兵）→ 调用方未声明主体上下文，
+          fail-closed 按 {"level_cap": "metadata"} 封顶（不返回正文）；
+        - **显式传 None** → 普通 api_key 主体（无 scoped cap），行为同修复前
+          （routes_memory.py / routes_gateway.py 路由层恒显式传，普通 key 零回归）；
+        - **显式传 dict** → scoped key 的 level_cap/data_domain 叠加判定；
+        - **internal=True** → 显式声明「进程内全信主体」调用（等同 scope=None），
+          调用点必须注释理由——这是留给确无主体上下文内部链路的逃生门，
+          默认路径绝不经过它。
+
+        CD-105 实现注记：哨兵在此**公共入口**一次性解析为 None/dict 后再传给
+        _semantic_search_impl——下游（_chroma_search / _knowledge_hit /
+        _sqlite_keyword_search / disclose_for_principal）多处用 `if not scope:`
+        判空，哨兵对象本身 truthy 且无 .get()，泄漏即崩，故绝不能漏到下游。
+        """
+        if internal:
+            scope = None  # 显式内部全信主体（调用点须注释理由）
+        elif scope is _SCOPE_UNSET:
+            # CD-105 fail-closed：未声明主体上下文的直调一律按 metadata 封顶
+            scope = {"level_cap": "metadata"}
         t0 = time.perf_counter()
         res = await self._semantic_search_impl(req, scope=scope)
         ms = (time.perf_counter() - t0) * 1000.0
@@ -411,7 +505,13 @@ class DisclosureEngine:
 
 
     async def _semantic_search_impl(self, req: SemanticSearchRequest, scope: dict = None) -> dict:
-        """基于 ChromaDB 的语义搜索（CD-016: ChromaDB 故障时降级 SQLite 关键词 + degraded 标记）"""
+        """基于 ChromaDB 的语义搜索（CD-016: ChromaDB 故障时降级 SQLite 关键词 + degraded 标记）
+
+        CD-105：scope 由 semantic_search 解析哨兵后传入，此处**只收 None 或 dict**
+        （_SCOPE_UNSET 哨兵绝不进入本函数——下游 `if not scope:` 判空会被 truthy
+        哨兵对象骗过并因无 .get() 崩溃）。默认 scope=None 仅供语义搜索包装层
+        已解析后的调用；直调本私有方法不在契约内。
+        """
         hub = self.hub
         degraded = False
         # CD-052（用户修正 4）: 索引重建窗口 fail-closed——不返回任何正文，
@@ -585,9 +685,12 @@ class DisclosureEngine:
             chunk["owner_agent_id"] = chunk.get("source_agent_id") or ""
             # 既有 search_chunks 语义（disclosure.search_chunks）：逐 chunk
             # 8 规则链判定 → min(请求方判定, chunk 存储级别) → 滑窗降级
-            level = self._calculate_disclosure_level(
+            # 修复轮：统一走 disclose_for_principal(scope=scope)——scoped key 的
+            # level_cap / data_domain 在 doc 分支同样生效（此前裸调 _calculate_
+            # disclosure_level，scope 被绕过）
+            level = self.disclose_for_principal(
                 memory=chunk, requester=req.requester_agent_id, task={},
-                required_level=DisclosureLevel.SUMMARY,
+                required_level=DisclosureLevel.SUMMARY, scope=scope,
             )
             if level == DisclosureLevel.NONE:
                 return None
@@ -871,14 +974,31 @@ class DisclosureEngine:
                 window.append((now, cid))
             self._chunk_window[key] = window
 
-    async def search_chunks(self, requester, query, doc_id="", limit=10):
+    async def search_chunks(self, requester, query, doc_id="", limit=10,
+                            scope=_SCOPE_UNSET, internal: bool = False):
         """H3 chunk 检索（含披露过滤 + 防拼接滑窗）。
 
         逐 chunk 跑 8 规则链，结果级别 = min(请求方判定, chunk 存储级别)（E.2 r8 语义）。
         滑窗累计 >50% -> 本次降级（只返回 summary 级）+ 审计。
         parent_hint 只给布尔量（E.3：total_chunks 移除防结构泄露）。
+
+        scope 语义（CD-100，2026-09-23，fail-closed 收口——修复前 scope 只在
+        HTTP 路由层注入，进程内直调无 cap，fail-open）：
+        - **未传**（默认 _SCOPE_UNSET 哨兵）→ 调用方未声明主体上下文，
+          fail-closed 按 {"level_cap": "metadata"} 封顶（不返回正文）；
+        - **显式传 None** → 普通 api_key 主体（无 scoped cap），行为同修复前
+          （routes_pipeline.py 路由层恒显式传，普通 key 零回归）；
+        - **显式传 dict** → scoped key 的 level_cap/data_domain 叠加判定；
+        - **internal=True** → 显式声明「进程内全信主体」调用（等同 scope=None），
+          调用点必须注释理由——这是留给确无主体上下文内部链路的逃生门，
+          默认路径绝不经过它。
         """
         hub = self.hub
+        if internal:
+            scope = None  # 显式内部全信主体（调用点须注释理由）
+        elif scope is _SCOPE_UNSET:
+            # CD-100 fail-closed：未声明主体上下文的直调一律按 metadata 封顶
+            scope = {"level_cap": "metadata"}
 
         where = []
         params = []
@@ -916,9 +1036,9 @@ class DisclosureEngine:
         for row in rows:
             chunk = _row_dict(row)
             chunk["owner_agent_id"] = chunk.get("source_agent_id") or ""
-            level = self._calculate_disclosure_level(
+            level = self.disclose_for_principal(
                 memory=chunk, requester=requester, task={},
-                required_level=DisclosureLevel.SUMMARY,
+                required_level=DisclosureLevel.SUMMARY, scope=scope,
             )
             if level == DisclosureLevel.NONE:
                 continue

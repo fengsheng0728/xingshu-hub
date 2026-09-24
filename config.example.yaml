@@ -14,7 +14,8 @@ auth:
   enabled: true                    # 是否启用 API Key 认证
   hub_token: "CHANGE_ME_强随机值"   # 部署级单 token（P0 安全底线）：REST 门卫凭据，
                                    # 所有 Agent/dashboard 共用；留空=仅 api_key 认证。
-  registration: open               # open=自注册 | guarded=受管(需配 hub_token,禁匿名注册)
+  registration: guarded            # guarded=受管注册(默认,需配 hub_token,禁匿名注册) | open=自注册(仅可信内网)
+                                   # CD-099: 代码默认已是 guarded；显式写 open 才会回落自注册
 
   # ── S1 身份接入（2026-08-05）──
   # mode: local | ldap | oidc | hybrid
@@ -81,6 +82,11 @@ logging:
 server:
   host: 127.0.0.1                  # 监听地址 (127.0.0.1=仅本机, 0.0.0.0=局域网)
   port: 3060                       # 监听端口
+
+  # CD-080: 可信代理列表（CIDR/IP）。默认空 = 不信任任何 X-Forwarded-For 头
+  # （伪造 XFF 不能绕过每 IP 限速/熔断）。仅当 Hub 部署在反向代理之后时，
+  # 才把代理出口 IP/网段填进来，例如 ["127.0.0.1"] 或 ["10.0.0.0/8"]。
+  # trusted_proxies: []
 
   # CD-068: 可选传输层加密（默认关=旧行为零迁移）。开启后 REST 走 https、WS 走 wss，
   # 对外放出 API 前必须解决这一层（否则 Bearer 凭据明文过网）。

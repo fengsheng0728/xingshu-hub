@@ -194,6 +194,7 @@ EXPECTED_ROUTES = [
     "/api/v1/sessions/recent",
     "/api/v1/sessions/handoff",
     "/api/v1/knowledge/reindex",
+    "/api/v1/activity",   # CD-085(a)：活动流统一读面（验收方登记）
 ]
 
 EXPECTED_ROUTE_METHODS = {

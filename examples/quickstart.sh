@@ -143,11 +143,10 @@ async def main():
             # ③ ping → 期待 pong
             await ws.send(json.dumps(env("ping", {})))
             # ④ request：WS 上的同步方法（memory_search / memory_store / memory_list）
-            # ⚠️ CD-091（2026-09-22 实测）：`memory_search` 目前**恒返回 error**
-            #    （Hub 内部调了不存在的 `hub.search_memory`，真名是 `hub.memory_search(req)`），
-            #    故这里用可用的 `memory_list` 演示 request 通道；CD-091 修好后可换回 memory_search。
+            #    CD-091 已修（2026-09-22）：memory_search 走真实方法 hub.memory_search(req)，
+            #    用上面写入的记忆内容里的关键词演示检索。
             rid = uuid.uuid4().hex
-            req = env("request", {"method": "memory_list", "params": {"kind": ""}})
+            req = env("request", {"method": "memory_search", "params": {"query": "quickstart", "limit": 5}})
             req["id"] = rid
             await ws.send(json.dumps(req))
 

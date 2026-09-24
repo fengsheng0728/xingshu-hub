@@ -107,7 +107,9 @@ def test_e2a_upgrade_idempotent_on_db_with_column(tmp_path):
     _alembic(db, "upgrade", "head")
     assert _cols(db) == before, "已有列的库 upgrade 后列集合不得变化"
     # 版本随 CD-060 变更：本断言在 "upgrade head" 之后，属版本指针
-    assert _version(db) == "0010_employee_keys"
+    # （2026-09-24 CD-111：head 前进到 0014 team_members hash 列，同步 bump；
+    #  由 Hermes 验收方同步，非执行方扩面）
+    assert _version(db) == "0014_team_members_remote_api_key_hash"
 
 
 def test_e2b_upgrade_adds_column_on_old_db(tmp_path):
@@ -124,7 +126,9 @@ def test_e2b_upgrade_adds_column_on_old_db(tmp_path):
     assert "embedding" in cols, f"0005 未补 embedding 列，实测: {cols}"
     assert cols[-3:] == ["created_at", "updated_at", "embedding"]  # ALTER 追加在末尾
     # 版本随 CD-060 变更：本断言在 "upgrade head" 之后，属版本指针
-    assert _version(db) == "0010_employee_keys"
+    # （2026-09-24 CD-111：head 前进到 0014 team_members hash 列，同步 bump；
+    #  由 Hermes 验收方同步，非执行方扩面）
+    assert _version(db) == "0014_team_members_remote_api_key_hash"
 
 
 def test_e2_revision_chain():

@@ -44,6 +44,11 @@ class TestL8T3_TimeoutConfig:
         assert "_MAX_IN_FLIGHT" in hub
 
         # sync-hub-agent 为仓库根的平行目录（agent 端独立仓库）
-        with open(_ROOT.parent / "sync-hub-agent" / "backend" / "tools" / "executor.py", encoding="utf-8") as f:
+        # CD-075 处置变更（2026-09-23 b07a6f0）：Agent 端仓已归档并删除，
+        # 退出交付面 → 仓不在即 skip（跨仓耦合校验不再假红）。
+        _agent_exec = _ROOT.parent / "sync-hub-agent" / "backend" / "tools" / "executor.py"
+        if not _agent_exec.exists():
+            pytest.skip("Agent 端仓不存在（CD-075 已归档删除）")
+        with open(_agent_exec, encoding="utf-8") as f:
             executor = f.read()
         assert "DEFAULT_TIMEOUT" in executor or "timeout" in executor.lower()

@@ -16,6 +16,7 @@ import numpy as np
 
 from envelope import envelope_ping, serialize
 from transport_audit import log_ping_pong
+from logfmt import rotate_request_id
 
 class BufferMixin:
     """Auto-generated mixin — do not edit manually unless you know why."""
@@ -31,6 +32,7 @@ class BufferMixin:
         """CD-017: buffer_log 持久化攒批 worker — 独立队列 + 单事务批量 INSERT，
         入队路径零阻塞；最终一致（允许延迟不允许缺漏）。"""
         while self._running:
+            rotate_request_id("trace-persist")  # CD-116：每轮 tick 轮换 request id
             batch = []
             try:
                 item = await asyncio.wait_for(self._trace_persist_queue.get(), timeout=0.5)
@@ -47,6 +49,7 @@ class BufferMixin:
 
     async def _write_buffer_worker(self):
         while self._running:
+            rotate_request_id("write-buffer")  # CD-116：每轮 tick 轮换 request id
             batch = []
             try:
                 batch.append(await asyncio.wait_for(self._write_queue.get(), timeout=0.5))
@@ -64,6 +67,7 @@ class BufferMixin:
 
     async def _wiki_sync_throttler(self):
         while self._running:
+            rotate_request_id("wiki-sync")  # CD-116：每轮 tick 轮换 request id
             if self._wiki_sync_pending:
                 now = time.time()
                 if now - self._last_wiki_sync >= self._WIKI_SYNC_COOLDOWN:
@@ -75,6 +79,10 @@ class BufferMixin:
                         # 必须在 to_thread 执行，否则阻塞事件循环饿死所有 HTTP 请求
                         if os.environ.get("SYNC_HUB_DISABLE_WIKI_SYNC") == "1":
                             logger.debug("wiki sync disabled by SYNC_HUB_DISABLE_WIKI_SYNC")
+                            # 禁用分支也必须给 result 赋值：下方通知段无条件 result.get(...)，
+                            # 缺赋值会抛 UnboundLocalError，被外层 except 吞成每周期一条
+                            # "Wiki sync failed" 假告警（终审断点 2）。
+                            result = {"created": 0, "updated": 0, "skipped": 0, "inbox_new": 0}
                         else:
                             result = await asyncio.to_thread(sync)
                             logger.debug(f"Wiki sync: +{result['created']} ~{result['updated']} ={result['skipped']}")

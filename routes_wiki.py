@@ -8,7 +8,8 @@ import os
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 import routes_common
-from routes_common import (get_current_agent, get_current_principal,
+from routes_common import (get_current_agent, get_current_agent_optional,
+                             get_current_principal,
                              principal_is_privileged,
                              require_ops_privilege, log_ops_trigger)
 
@@ -18,6 +19,10 @@ _wiki_sync_state: dict = {
     "running": False, "started_at": None, "last_finished_at": None,
     "last_result": None, "last_error": None,
 }
+
+# /wiki/import 体量上限（防单请求撑爆磁盘/内存）
+WIKI_IMPORT_MAX_PAGES = 200
+WIKI_IMPORT_MAX_PAGE_BYTES = 1024 * 1024  # 单页 content ≤ 1MB
 
 
 def _now_iso() -> str:
@@ -58,23 +63,38 @@ async def api_wiki_pages(current_agent: str = Depends(get_current_agent),
 
 @router.get("/api/v1/wiki/export")
 async def api_wiki_export(
-    current_agent: str = Depends(get_current_agent),
+    request: Request = None,
+    current_agent: str = Depends(get_current_agent_optional),
     principal=Depends(get_current_principal),
 ):
     """导出所有 Wiki 页面为 JSON（联邦同步用）
 
     CD-054 wiki 组收编（T23，2026-09-20 用户冻结口径 2a）：关门——普通 agent 禁入，
-    principal_is_privileged（hub_token / manager / orchestrator）为假 → 403 +
-    _log_deny 留痕（gateway_read_log denied 行，kind=wiki target=export，
-    与 T18/CD-059 同口径）；特权放行且返回体不变。跨 Hub 需求走
-    /team/proxy/disclose。NO_AUTH 开发态不拦（同 _wiki_reviewer_gate 口径）。
+    特权放行且返回体不变。跨 Hub 需求走配对凭据通道（CD-110）。
+    CD-110（2026-09-24）：路由层豁免 + 函数内双通道自认证（与
+    /api/v1/federation/snapshot 同一 helper：routes_common.authorize_federated_caller，
+    判定逐行等价）——标准凭据 hub_token / manager / orchestrator **或**
+    team_members.remote_api_key 未撤销命中；两路皆败 401/403。拒绝留痕 _log_deny
+    保留（403/401 都留痕，与 T18/CD-059 同口径）。NO_AUTH 开发态不拦。
+    request 默认 None 仅为兼容既有直调测试（不传 request 的进程内调用沿用
+    principal 特权判定）；HTTP 路径 FastAPI 必注入 Request，双通道必生效。
     """
-    if not routes_common.NO_AUTH and not principal_is_privileged(principal):
-        from routes_gateway import _log_deny
-        _log_deny(current_agent, principal, "wiki", "", "export")
-        raise HTTPException(
-            status_code=403,
-            detail="仅 manager/orchestrator 角色或 hub_token 可导出 Wiki 全量页面")
+    if not routes_common.NO_AUTH:
+        try:
+            if request is not None:
+                routes_common.authorize_federated_caller(
+                    request,
+                    role_detail="仅主管/店长可导出 Wiki 全量页面",
+                    detail="仅主管/店长或配对成员可导出 Wiki 全量页面")
+            elif not principal_is_privileged(principal):
+                # 进程内直调兼容（既有测试/工具不传 request）：沿用既有特权判定
+                raise HTTPException(
+                    status_code=403,
+                    detail="仅 manager/orchestrator 角色或 hub_token 可导出 Wiki 全量页面")
+        except HTTPException:
+            from routes_gateway import _log_deny
+            _log_deny(current_agent, principal, "wiki", "", "export")
+            raise
     from wiki_engine import WIKI_ROOT
     import os as _os
     pages = {}
@@ -92,14 +112,49 @@ async def api_wiki_export(
 
 @router.post("/api/v1/wiki/import")
 async def api_wiki_import(
-    request: Request,
-    current_agent: str = Depends(get_current_agent),
+    request: Request = None,
+    current_agent: str = Depends(get_current_agent_optional),
+    principal=Depends(get_current_principal),
 ):
-    """从远程 Hub 导入 Wiki 页面（联邦同步）"""
+    """从远程 Hub 导入 Wiki 页面（联邦同步）
+
+    与 export 同门同型：CD-110（2026-09-24）路由层豁免 + 函数内双通道自认证
+    （routes_common.authorize_federated_caller，与 /api/v1/federation/snapshot
+    同一 helper）——配对凭据 team_members.remote_api_key 未撤销命中即放行。
+    拒绝留痕 _log_deny 保留（403/401 都留痕）。NO_AUTH 开发态不拦。
+    体量上限：pages ≤ 200、单页 content ≤ 1MB，超限 400（不削弱）。
+    """
+    if not routes_common.NO_AUTH:
+        try:
+            if request is not None:
+                routes_common.authorize_federated_caller(
+                    request,
+                    role_detail="仅主管/店长可导入 Wiki 页面",
+                    detail="仅主管/店长或配对成员可导入 Wiki 页面")
+            elif not principal_is_privileged(principal):
+                # 进程内直调兼容（既有测试/工具不传 request）：沿用既有特权判定
+                raise HTTPException(
+                    status_code=403,
+                    detail="仅 manager/orchestrator 角色或 hub_token 可导入 Wiki 页面")
+        except HTTPException:
+            from routes_gateway import _log_deny
+            _log_deny(current_agent, principal, "wiki", "", "import")
+            raise
     from wiki_engine import WIKI_ROOT, validate_path
     import os as _os
     data = await request.json()
     pages = data.get("pages", {})
+    if len(pages) > WIKI_IMPORT_MAX_PAGES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"pages 数量超限：{len(pages)} > {WIKI_IMPORT_MAX_PAGES}")
+    for rel_path, content in pages.items():
+        if not isinstance(content, str):
+            raise HTTPException(status_code=400, detail=f"页面内容必须是字符串: {rel_path}")
+        if len(content.encode("utf-8")) > WIKI_IMPORT_MAX_PAGE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"单页内容超限（≤1MB）: {rel_path}")
     imported = 0
     errors = []
     for rel_path, content in pages.items():
@@ -501,7 +556,7 @@ async def api_wiki_approve(
     if updated:
         try:
             from wiki_sync import sync
-            sync(force=True)
+            await asyncio.to_thread(sync, force=True)
         except Exception as _exc:
             logger.debug("routes_wiki silent-except(api_wiki_approve): %s", _exc)
     return {"ok": True, "approved": updated > 0}

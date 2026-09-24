@@ -155,9 +155,89 @@ def _pre_migrate_backup(db_path: str, backup_dir: str) -> str:
         return ""
 
 
+def _alembic_head_revision() -> str:
+    """从 migrations/alembic 脚本目录读 head revision（只读脚本，不硬编码版本号）。"""
+    from alembic.config import Config as _AlembicConfig
+    from alembic.script import ScriptDirectory
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    acfg = _AlembicConfig(os.path.join(repo_root, "alembic.ini"))
+    acfg.set_main_option("script_location", os.path.join(repo_root, "migrations", "alembic"))
+    return ScriptDirectory.from_config(acfg).get_current_head()
+
+
+# 内联 DDL **有意不含**、必须靠迁移回补的 revision（CD-060 有意差异，逐条登记）。
+# 缺列新库的 alembic 登记目标 = 本链**最靠前**一条的前一版（见 _stamp_alembic_head）。
+# 新增同类缺口迁移时往这里追加——**不要**改回「取 head 前一版」（会随 head 漂移）。
+_INLINE_DDL_GAP_REVISIONS = ("0013_agents_api_key_hash_backstop",)
+
+
+def _alembic_down_revision(rev: str):
+    """读指定 revision 的 down_revision（单头链；多父或无 → None，只读脚本）。"""
+    from alembic.config import Config as _AlembicConfig
+    from alembic.script import ScriptDirectory
+    repo_root = os.path.dirname(os.path.abspath(__file__))
+    acfg = _AlembicConfig(os.path.join(repo_root, "alembic.ini"))
+    acfg.set_main_option("script_location", os.path.join(repo_root, "migrations", "alembic"))
+    dr = ScriptDirectory.from_config(acfg).get_revision(rev).down_revision
+    return dr if isinstance(dr, str) else None
+
+
+def _stamp_alembic_head(db_path: str) -> bool:
+    """对无迁移登记的库写入 alembic head 版本（等价 `alembic stamp head`）。
+
+    只处理「无 alembic_version 表」的库；已有登记的库（哪怕落后）不动——
+    落后库由 main.py 启动检查的 upgrade / fail-closed 路径负责。
+    返回 True = 本次写入了登记。缺 hash 列（CD-060 有意差异）的库只登记到
+    **最早一条缺口迁移的前一版**（见 _INLINE_DDL_GAP_REVISIONS），把 0013
+    兜底补列留给启动迁移 / upgrade head（见 0013 docstring）。
+    取固定锚而非「head 前一版」——否则 head 每前进一次目标就漂一格，
+    被跳过的缺口迁移永不再执行（CD-111 连带回归，2026-09-24 修复）。
+    """
+    head = _alembic_head_revision()
+    if not head:
+        return False
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='alembic_version'"
+        ).fetchone()
+        if row:
+            return False
+        conn.execute(
+            "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)")
+        # 终审断点 3 修正：内联 agents DDL **有意不含** api_key_hash /
+        # api_key_prev_hash（CD-060 登记差异）。缺列库若直接登记 head，兜底迁移
+        # 0013 永不执行 → 新部署永久明文模式且 run_startup_migration 报 up_to_date
+        # 误导。缺列库只登记到 head 的前一版，让启动迁移（main.py
+        # run_startup_migration）或手动 `alembic upgrade head` 执行 0013 补列。
+        target = head
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(agents)")}
+        if "api_key_hash" not in cols:
+            # CD-111 连带回归修复（2026-09-24，验收期实测发现）：**不能**取
+            # 「head 的前一版」——head 每前进一次目标就漂一格，被跳过的缺口
+            # 迁移永不再执行。实测：0014 落地后 head=0014，缺列新库登记到
+            # 0013，0013 兜底补列被跳过 → agents 永久缺 hash 两列（终审断点 3
+            # 的病复发，test_startup_migration::test_fresh_init_db_stamps_head 抓出）。
+            # 固定为「最早一条缺口迁移」的前一版，head 再前进也不漂。
+            prev = _alembic_down_revision(_INLINE_DDL_GAP_REVISIONS[0])
+            if prev:
+                target = prev
+        conn.execute("INSERT INTO alembic_version (version_num) VALUES (?)", (target,))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
 def init_db():
     conn = sqlite3.connect(CONFIG.DB_PATH)
     c = conn.cursor()
+
+    # 全新库判定（数据层修复轮）：建表前无 agents 表 = 本次 init_db 从零建 schema，
+    # 结尾只对全新库登记 alembic head（老库不猜不动，行为不变）。
+    _fresh_db = c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='agents'"
+    ).fetchone() is None
 
     # Agent 表
     # CD-060（2026-09-20）：列序对齐 alembic 基线（0001 基线 + 0002/0003 追加序），
@@ -467,6 +547,7 @@ def init_db():
     # 内网组队 — 团队成员表
     # CD-060（2026-09-20）：补 team_id（对齐 0001 基线；存量库由 alembic 0007 幂等补列），
     # shared_secret 保持在末位（对齐现库追加序），下方 c3 ALTER 转 no-op。
+    # CD-111（2026-09-24）：remote_api_key_hash 追加在末位，对齐 0014 ALTER 追加序。
     c.execute("""
         CREATE TABLE IF NOT EXISTS team_members (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -485,6 +566,7 @@ def init_db():
             revoked_at TEXT,
             team_id INTEGER REFERENCES teams(id),
             shared_secret TEXT,  -- P2: 配对握手 HKDF 派生的 AES-GCM 会话密钥（hex），联邦加密信道用
+            remote_api_key_hash TEXT,
             UNIQUE(local_agent_id, remote_hub_id)
         )
     """)
@@ -663,6 +745,9 @@ def init_db():
         c3.execute("ALTER TABLE knowledge_base ADD COLUMN embedding BLOB")
         conn3.commit()
 
+    # CD-111（2026-09-24）：remote_api_key_hash 哈希列在 alembic 0014，
+    # 勿在此新增 ALTER（本段已冻结）。读侧按 PRAGMA 检测 hash 列自动切换，
+    # 缺列不影响老库冷启动（明文匹配继续有效）。
     # 增量迁移：team_members.shared_secret（P2 联邦加密会话密钥）
     c3.execute("PRAGMA table_info(team_members)")
     tm_cols = [col[1] for col in c3.fetchall()]
@@ -977,6 +1062,46 @@ def init_db():
     except Exception as _exc:
         logger.debug("db silent-except @conn7: %s", _exc)
     conn7.close()
+    # CD-084（2026-09-23）死信表：「失败只打日志」路径（自动化连失败停用/通知发送失败/
+    # 维护清理异常等）的兜底账本——落行供 /api/v1/maintenance/dead-letters 面板与
+    # /metrics 暴露，POST .../retry 按 source 的可行最小语义重试或标记。
+    # **必须与 alembic 0011 双侧同步**（CD-060 硬等式门禁要求两侧 = 0 差异）。
+    conn7b = sqlite3.connect(CONFIG.DB_PATH)
+    conn7b.execute("""CREATE TABLE IF NOT EXISTS dead_letters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT '',
+    failed_at TEXT DEFAULT (datetime('now')),
+    retried INTEGER NOT NULL DEFAULT 0,
+    retried_at TEXT NOT NULL DEFAULT ''
+)""")
+    conn7b.execute("CREATE INDEX IF NOT EXISTS idx_dead_letters_retried"
+                   " ON dead_letters(retried, failed_at)")
+    conn7b.commit()
+    conn7b.close()
+    # CD-081 最小骨架（KB 评估框架）：评估结果落库层——tools/kb_eval.py 跑完一组
+    # 评估 INSERT 一行（dataset/name/recall_at_5/refusal_rate/p95_ms/样本数/
+    # 配置 hash/配置快照）。指标列 REAL 可空（dry-run 等只登记场景）。
+    # **必须与 alembic 0012 双侧同步**（CD-060 硬等式门禁要求两侧 = 0 差异）。
+    conn7c = sqlite3.connect(CONFIG.DB_PATH)
+    conn7c.execute("""CREATE TABLE IF NOT EXISTS evaluation_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset TEXT NOT NULL,
+    name TEXT NOT NULL DEFAULT '',
+    recall_at_5 REAL,
+    refusal_rate REAL,
+    p95_ms REAL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    config_hash TEXT NOT NULL DEFAULT '',
+    config_json TEXT NOT NULL DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now'))
+)""")
+    conn7c.execute("CREATE INDEX IF NOT EXISTS idx_evaluation_tasks_dataset"
+                   " ON evaluation_tasks(dataset, created_at)")
+    conn7c.commit()
+    conn7c.close()
     # ═══ CD-024 增长型表索引（2026-09-20）═══
     # 为**随业务增长**的表补索引，支撑代码里实际存在的 WHERE/ORDER BY 模式
     # （改动前逐条 EXPLAIN QUERY PLAN 实测全为 SCAN，见 tests/test_growth_indexes.py）。
@@ -1002,6 +1127,25 @@ def init_db():
         conn8.execute(_sql)
     conn8.commit()
     conn8.close()
+
+    # ============ alembic 版本登记（数据层修复轮，CD-082 后续）============
+    # 背景：此前 init_db 建的全新库没有 alembic_version 表 → main.py 启动迁移
+    # 检查把「全新库」与「从未登记迁移的老库」一并归入 skipped_no_version_table
+    # 永久跳过，此后新增 revision 永远不会作用到这些库。
+    # CD-060 已把内联 DDL + 冻结 ALTER 段与 alembic 基线全链对齐
+    # （tests/test_schema_hard_equality.py 硬等式门禁 = 0 差异），init_db 完成
+    # 时全新库的 schema 即 head 形态 —— 对它登记 head 版本（等价
+    # `alembic stamp head`），使「全新库」与「已迁移库」不可区分。
+    # 只对全新库登记：已有库（含无 version 表的老库）不猜不动，仍走 main.py
+    # 的 skipped_no_version_table 告警口径（行为不变）。
+    if _fresh_db:
+        try:
+            if _stamp_alembic_head(CONFIG.DB_PATH):
+                logger.info("[migration] fresh DB stamped to alembic head")
+        except Exception as _exc:
+            # alembic 不可用/读取失败不阻塞启动——维持旧行为
+            # （启动检查按 skipped_no_version_table 跳过并告警）
+            logger.warning("alembic head stamp failed (non-fatal): %s", _exc)
 
 
 _init_guard = os.environ.get("SYNC_HUB_SKIP_MIGRATE_BACKUP", "")
@@ -1138,3 +1282,35 @@ def check_windows_firewall(port: int = 3060) -> dict:
 # ============ 数据库初始化 ============
 
 
+
+def record_dead_letter(source, kind="", payload=None, error="", db_path=None):
+    """CD-084 死信落库：「失败只打日志」路径的兜底账本。
+
+    语义：主流程失败已发生时**追加**一行账本（不改原失败语义，不吞异常），
+    供 GET /api/v1/maintenance/dead-letters 面板、/metrics 暴露与
+    POST .../dead-letters/{id}/retry 重试。落库自身失败只 debug 日志，
+    绝不反过来影响主流程。payload 任意可 JSON 序列化对象；
+    超长字段截断（source 200 / kind 80 / payload 2000 / error 500 字符）。
+    返回插入行 id；失败返回 None。
+    """
+    try:
+        if payload is None:
+            payload_json = ""
+        elif isinstance(payload, str):
+            payload_json = payload[:2000]
+        else:
+            payload_json = json.dumps(payload, ensure_ascii=False, default=str)[:2000]
+        conn = sqlite3.connect(db_path or CONFIG.DB_PATH)
+        try:
+            cur = conn.execute(
+                "INSERT INTO dead_letters (source, kind, payload_json, error)"
+                " VALUES (?, ?, ?, ?)",
+                (str(source)[:200], str(kind or "")[:80], payload_json,
+                 str(error or "")[:500]))
+            conn.commit()
+            return cur.lastrowid
+        finally:
+            conn.close()
+    except Exception as _exc:
+        logger.debug("db record_dead_letter 落库失败（不阻塞主流程）: %s", _exc)
+        return None

@@ -7,6 +7,7 @@ NO_AUTH 开关、auth_provider 惰性单例、Depends 认证注入。
 引用——routes.py 会 re-export 本模块的这些名字，语义与拆分前完全一致。
 """
 import asyncio
+import ipaddress
 import logging
 import os
 import sqlite3
@@ -42,13 +43,73 @@ def _valid_credential(token: str, client_ip: str = "") -> bool:
     return _auth_provider().authenticate(token, client_ip, touch=False) is not None
 
 
-def _scope_client_ip(scope) -> str:
-    """从 ASGI scope 提取客户端 IP。"""
+def _direct_client_ip(scope) -> str:
+    """从 ASGI scope 提取直连对端 IP（连接层 client 元组）。
+
+    CD-107（2026-09-24）：自旧 _scope_client_ip 拆出，语义原样保留
+    （client[0] / "unknown" / 异常回落）。这是「直连对端」原子，不看任何代理头。
+    """
     try:
         client = scope.get("client")
         return client[0] if client else "unknown"
     except Exception:
         return "unknown"
+
+
+# ============ CD-080（2026-09-23）：可信代理感知的 ClientIP 解析 ============
+# 现状风险：限速/认证日志按 client IP 记账，若直接采信 X-Forwarded-For，伪造 XFF 即可
+# 换 IP 绕过每 IP 限速。口径：仅当**直连对端**命中 CONFIG.TRUSTED_PROXIES
+# （config.yaml server.trusted_proxies，CIDR/IP 列表，默认空=不信任任何代理头）
+# 才采信 XFF（取链首=原始客户端；非法值回落对端 IP），否则一律用连接对端 IP。
+# CD-107（2026-09-24）：下沉自 routes.py，作为全仓唯一 IP 口径。
+_TRUSTED_NETS_KEY = None
+_TRUSTED_NETS_CACHE: list = []
+
+
+def _trusted_proxy_nets() -> list:
+    """解析 CONFIG.TRUSTED_PROXIES 为 ip_network 列表（按值缓存；非法项告警并跳过）。
+
+    CD-080；CD-107（2026-09-24）：下沉自 routes.py，作为全仓唯一 IP 口径。
+    """
+    global _TRUSTED_NETS_KEY, _TRUSTED_NETS_CACHE
+    raw = getattr(CONFIG, "TRUSTED_PROXIES", None) or []
+    key = tuple(str(x) for x in raw)
+    if key == _TRUSTED_NETS_KEY:
+        return _TRUSTED_NETS_CACHE
+    nets = []
+    for item in key:
+        try:
+            nets.append(ipaddress.ip_network(item, strict=False))
+        except ValueError:
+            logger.warning("CD-080: server.trusted_proxies 项 %r 非法（非 CIDR/IP），已忽略", item)
+    _TRUSTED_NETS_KEY, _TRUSTED_NETS_CACHE = key, nets
+    return nets
+
+
+def _scope_client_ip(scope) -> str:
+    """CD-080：客户端 IP 单一口径（全仓唯一实现，routes.py 反向引用本函数）。
+
+    直连对端在可信代理列表内 → 采信 X-Forwarded-For 链首；否则用连接对端 IP。
+    CD-107（2026-09-24）：下沉自 routes.py，作为全仓唯一 IP 口径。
+    """
+    peer = _direct_client_ip(scope)
+    nets = _trusted_proxy_nets()
+    if not nets or peer == "unknown":
+        return peer
+    try:
+        peer_addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return peer
+    if not any(peer_addr in n for n in nets):
+        return peer
+    for name, value in scope.get("headers", []):
+        if name == b"x-forwarded-for":
+            first = value.decode("latin-1", "replace").split(",")[0].strip()
+            try:
+                return str(ipaddress.ip_address(first))
+            except ValueError:
+                return peer
+    return peer
 
 
 def _authenticate(db_path: str, auth_header) -> str or None:
@@ -307,6 +368,93 @@ def require_role(current_agent: str = "", roles=PRIVILEGED_ROLES,
     if _agent_role(current_agent) in tuple(roles):
         return
     raise HTTPException(status_code=403, detail=detail)
+
+
+# ============ CD-110（2026-09-24）：联邦端点双通道自认证（配对凭据通道） ============
+# 自 routes_federation._is_paired_member_key / _authorize_snapshot_caller 下沉
+# （搬运时判定逐行等价；routes_federation 改为引用本模块的同一函数，行为零变化）。
+# 使用前提：路由层已对相应前缀做认证豁免（AUTH_ALLOWLIST_PREFIXES）+ 端点函数内
+# 调用本函数自认证 —— 豁免 ≠ 公开，两者缺一不可。
+
+
+def is_paired_member_key(token: str) -> bool:
+    """配对凭据核验：team_members.remote_api_key 命中且未撤销（revoked_at IS NULL）。
+
+    L-2 已知问题：remote_api_key 目前明文落库。若表后续迁移出 remote_api_key_hash
+    列（sha256；加列属 alembic 迁移，不在本次改动范围），按 hash 比对并兼容存量
+    明文行（OR 两列）；无 hash 列则仅走明文匹配。表缺失/查询异常 → False（fail-closed）。
+    """
+    import hashlib
+    try:
+        conn = sqlite3.connect(CONFIG.DB_PATH)
+        try:
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(team_members)")}
+            if "remote_api_key_hash" in cols:
+                h = hashlib.sha256(token.encode("utf-8")).hexdigest()
+                row = conn.execute(
+                    "SELECT 1 FROM team_members WHERE revoked_at IS NULL "
+                    "AND (remote_api_key = ? OR remote_api_key_hash = ?) LIMIT 1",
+                    (token, h)).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT 1 FROM team_members WHERE revoked_at IS NULL "
+                    "AND remote_api_key = ? LIMIT 1",
+                    (token,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _federated_hub_agents():
+    """require_role 的 agents 映射（惰性取 hub_core.hub.agents，避免本模块 ↔ hub_core 环）。"""
+    try:
+        from hub_core import hub
+        return hub.agents
+    except Exception:
+        return None
+
+
+def authorize_federated_caller(request, *,
+                               role_detail: str = "仅主管/店长可导出联邦快照",
+                               detail: str = "仅主管/店长或配对成员可导出联邦快照") -> None:
+    """联邦端点函数内双通道认证（对齐 /team/proxy/disclose 的既成模式）。
+
+    路由层已对本路径前缀认证豁免（routes.AUTH_ALLOWLIST_PREFIXES），在此自校验：
+    (a) 标准凭据：hub_token 或 manager/orchestrator 角色 → 放行；
+    (b) 配对凭据：team_members.remote_api_key 未撤销命中 → 放行。
+    两路皆败 → 401（凭据无效）/403（身份有效但无权限），不泄露配对存在性。
+
+    判定自 routes_federation._authorize_snapshot_caller 逐行搬运（CD-110）；
+    role_detail/detail 仅定制拒绝文案，默认值与 snapshot 端点原文逐字一致。
+    """
+    auth_header = request.headers.get("Authorization") or ""
+    token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401,
+                            detail="Unauthorized: 缺少有效的 API Key")
+    # 通道 (a)：标准认证（agents/api_key、agent_keys、employee、hub_token）
+    principal = _auth_provider().authenticate(
+        token, _scope_client_ip(request.scope), touch=False)
+    if principal is not None:
+        if getattr(principal, "auth_mode", "") == "hub_token":
+            return
+        try:
+            require_role(getattr(principal, "subject_id", "") or "",
+                         agents=_federated_hub_agents(), no_auth=NO_AUTH,
+                         roles=("manager", "orchestrator"),
+                         detail=role_detail)
+            return
+        except HTTPException:
+            pass  # 身份有效但角色不足——仍给配对通道一次机会（最终回落 403）
+    # 通道 (b)：配对凭据（team_members.remote_api_key，未撤销）
+    if is_paired_member_key(token):
+        return
+    if principal is not None:
+        raise HTTPException(status_code=403, detail=detail)
+    raise HTTPException(status_code=401,
+                        detail="Unauthorized: 缺少有效的 API Key")
 
 
 async def require_ops_privilege(request, endpoint: str,

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from pydantic import BaseModel as PydanticBase, Field as PydanticField
 
@@ -131,7 +131,7 @@ async def health():
             "size_mb": db_size_mb,
         }
     except Exception as e:
-        checks["database"] = {"status": f"error: {e}"}
+        checks["database"] = {"status": f"error: {type(e).__name__}"}
 
     # ── 任务队列健康 ──
     try:
@@ -152,7 +152,7 @@ async def health():
             "stale_tasks": stale_tasks,  # 超过1天没动的任务
         }
     except Exception as e:
-        checks["tasks"] = {"status": f"error: {e}"}
+        checks["tasks"] = {"status": f"error: {type(e).__name__}"}
 
     # ── 内存池统计 ──
     try:
@@ -170,7 +170,7 @@ async def health():
             "recent_1h": recent_memories,
         }
     except Exception as e:
-        checks["memory_pool"] = {"status": f"error: {e}"}
+        checks["memory_pool"] = {"status": f"error: {type(e).__name__}"}
 
     # ── 磁盘空间 ──
     try:
@@ -180,7 +180,7 @@ async def health():
         free_gb = round(usage.free / (1024 * 1024 * 1024), 2)
         checks["disk"] = {"free_gb": free_gb}
     except Exception as e:
-        checks["disk"] = {"status": f"error: {e}"}
+        checks["disk"] = {"status": f"error: {type(e).__name__}"}
 
     # ── ChromaDB ──
     try:
@@ -190,13 +190,13 @@ async def health():
         else:
             checks["chromadb"] = {"status": "disabled"}
     except Exception as e:
-        checks["chromadb"] = {"status": f"error: {e}"}
+        checks["chromadb"] = {"status": f"error: {type(e).__name__}"}
 
     # ── db 门面观测面（D-10：慢查询护栏统计；观测面不许让 health 500，必须 try/except） ──
     try:
         checks["db_facade"] = db_facade.stats_snapshot()
     except Exception as e:
-        checks["db_facade"] = {"status": f"error: {e}"}
+        checks["db_facade"] = {"status": f"error: {type(e).__name__}"}
 
     # ── 整体状态判定 ──
     has_errors = any(
@@ -318,3 +318,125 @@ async def api_skills_catalog():
         return {"catalog": catalog}
     except Exception:
         return {"catalog": []}
+
+
+# ============ CD-084：/metrics（Prometheus 文本格式，监控最后一公里可做半边） ============
+
+def _metric_line(lines, name, value, help_text="", mtype="gauge", labels=None):
+    """拼装一条 Prometheus 文本行（value=None 时只落 HELP/TYPE，不落数值行）。"""
+    if help_text:
+        lines.append(f"# HELP {name} {help_text}")
+        lines.append(f"# TYPE {name} {mtype}")
+    if value is None:
+        return
+    if labels:
+        lab = ",".join(f'{k}="{str(v).replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))}"'
+                       for k, v in labels.items())
+        lines.append(f"{name}{{{lab}}} {value}")
+    else:
+        lines.append(f"{name} {value}")
+
+
+@router.get("/metrics")
+async def metrics():
+    """CD-084 监控最后一公里（/metrics 半边）：Prometheus 文本格式，零依赖手写。
+
+    只读既有观测口径，不新增采集：行计数（memory_pool/tasks/agents）、
+    db_facade 慢查询护栏计数、ChromaDB degraded 标记与向量数、备份最近状态
+    （复用 maintenance/backup-status 的磁盘扫描口径）、db 体积、死信积压。
+    每个采集块独立 try/except——观测面不许 500（与 /health 的 db_facade 段同纪律）。
+    免认证白名单登记在 routes.py AUTH_ALLOWLIST_PATHS（该文件归别的槽位，
+    未登记前 /metrics 走全局认证，带 hub_token/api_key 即可抓取）。
+    """
+    lines = []
+
+    # ── 行计数：memory_pool / tasks by status ──
+    try:
+        conn = hub._db()
+        conn.row_factory = sqlite3.Row
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM memory_pool")
+        _metric_line(lines, "synchub_memories_total", c.fetchone()[0],
+                     "memory_pool 行数")
+        c.execute("SELECT status, COUNT(*) AS cnt FROM tasks GROUP BY status")
+        _metric_line(lines, "synchub_tasks_total", None, "tasks 行数（按状态）")
+        for row in c.fetchall():
+            _metric_line(lines, "synchub_tasks_total", row["cnt"],
+                         labels={"status": row["status"] or "unknown"})
+        c.execute("PRAGMA page_count")
+        page_count = c.fetchone()[0]
+        c.execute("PRAGMA page_size")
+        page_size = c.fetchone()[0]
+        _metric_line(lines, "synchub_db_size_bytes", page_count * page_size,
+                     "SQLite 主库体积（page_count*page_size）")
+        # CD-084：死信积压（老库未迁移时表可能不存在 → 独立 try，缺失即跳过）
+        try:
+            c.execute("SELECT COUNT(*), COALESCE(SUM(retried=0),0) FROM dead_letters")
+            dl_total, dl_pending = c.fetchone()
+            _metric_line(lines, "synchub_dead_letters_total", dl_total,
+                         "死信账本总行数（CD-084）")
+            _metric_line(lines, "synchub_dead_letters_pending", dl_pending,
+                         "未处理死信数（retried=0，CD-084）")
+        except Exception as _exc:
+            logger.debug("routes_server silent-except(metrics) dead_letters: %s", _exc)
+        conn.close()
+    except Exception as _exc:
+        logger.debug("routes_server silent-except(metrics) db: %s", _exc)
+
+    # ── Agent 在线 ──
+    try:
+        total_agents = len(hub.agents)
+        online_agents = sum(1 for a in hub.agents.values() if a.get("status") == "online")
+        _metric_line(lines, "synchub_agents_total", total_agents, "注册 Agent 总数")
+        _metric_line(lines, "synchub_agents_online", online_agents, "在线 Agent 数")
+    except Exception as _exc:
+        logger.debug("routes_server silent-except(metrics) agents: %s", _exc)
+
+    # ── db 门面慢查询护栏（台账 slow_query_ms 口径，只读计数器） ──
+    try:
+        snap = db_facade.stats_snapshot()
+        _metric_line(lines, "synchub_db_calls_total", snap["calls"],
+                     "db_facade 调用总数", mtype="counter")
+        _metric_line(lines, "synchub_db_slow_queries_total", snap["slow_calls"],
+                     "db_facade 慢查询累计（>= threshold_ms）", mtype="counter")
+        _metric_line(lines, "synchub_db_slow_query_max_ms", snap["max_ms"],
+                     "db_facade 单次最大耗时 ms")
+        _metric_line(lines, "synchub_db_slow_query_threshold_ms", snap["threshold_ms"],
+                     "慢查询阈值 ms（config database.slow_query_ms）")
+    except Exception as _exc:
+        logger.debug("routes_server silent-except(metrics) db_facade: %s", _exc)
+
+    # ── ChromaDB degraded 标记 + 向量数（台账 chroma_max_vectors 口径配套） ──
+    try:
+        coll = getattr(hub, "_chroma_collection", None)
+        _metric_line(lines, "synchub_chromadb_degraded", 1 if coll is None else 0,
+                     "ChromaDB 降级标记（1=不可用）")
+        if coll is not None:
+            _metric_line(lines, "synchub_chromadb_documents", coll.count(),
+                         "ChromaDB 向量数")
+        _metric_line(lines, "synchub_chromadb_max_vectors",
+                     getattr(CONFIG, "CHROMA_MAX_VECTORS", 50000),
+                     "向量数水位阈值（config database.chroma_max_vectors）")
+    except Exception as _exc:
+        logger.debug("routes_server silent-except(metrics) chromadb: %s", _exc)
+
+    # ── 备份最近状态（复用 maintenance/backup-status 磁盘扫描口径，不读进程内 ts） ──
+    try:
+        from routes_maintenance import api_backup_status
+        bk = await api_backup_status()
+        _metric_line(lines, "synchub_backup_files", bk.get("count", 0),
+                     "备份文件份数")
+        latest = bk.get("latest") or {}
+        ts = 0
+        if latest.get("mtime"):
+            ts = int(datetime.fromisoformat(latest["mtime"]).timestamp())
+        _metric_line(lines, "synchub_backup_last_success_timestamp_seconds", ts,
+                     "最近备份 mtime（Unix 秒，0=无备份）")
+    except Exception as _exc:
+        logger.debug("routes_server silent-except(metrics) backup: %s", _exc)
+
+    _metric_line(lines, "synchub_uptime_seconds", round(time.time() - hub._start_time, 1),
+                 "Hub 运行时长秒")
+    return PlainTextResponse(
+        "\n".join(lines) + "\n",
+        media_type="text/plain; version=0.0.4; charset=utf-8")

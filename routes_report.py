@@ -11,6 +11,8 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from pydantic import BaseModel as PydanticBase, Field as PydanticField
 
+import tracing
+
 from models import CONFIG
 from hub_core import hub, hub_agent
 from notifications import notifications
@@ -64,7 +66,24 @@ async def api_daily_report():
                 base = cfg.get("api_base") or "https://api.deepseek.com/v1"
                 headers = {"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"}
                 payload = {"model": cfg.get("model", "deepseek-chat"), "messages": [{"role": "user", "content": prompt}], "temperature": 0.5, "max_tokens": 300}
-                resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+                _req_chars = len(json.dumps(payload, ensure_ascii=False))
+                with tracing.llm_span(cfg.get("provider", "openai"), cfg.get("model", "deepseek-chat"), span_name="llm.report") as _sp:
+                    _t0 = time.perf_counter()
+                    try:
+                        resp = await client.post(f"{base}/chat/completions", json=payload, headers=headers)
+                    except Exception as _e:
+                        tracing.record_llm_result(_sp, latency_ms=(time.perf_counter() - _t0) * 1000,
+                                                  request_chars=_req_chars, status="error",
+                                                  error=type(_e).__name__)
+                        raise
+                    _lat = (time.perf_counter() - _t0) * 1000
+                    tracing.record_llm_result(_sp, latency_ms=_lat, request_chars=_req_chars,
+                                              response_chars=len(resp.text or ""),
+                                              prompt_tokens=None,
+                                              completion_tokens=None,
+                                              status="ok" if resp.status_code == 200 else "error",
+                                              error=None if resp.status_code == 200
+                                              else f"HTTP {resp.status_code}")
                 if resp.status_code == 200:
                     summary = resp.json()["choices"][0]["message"]["content"]
         except Exception as e:

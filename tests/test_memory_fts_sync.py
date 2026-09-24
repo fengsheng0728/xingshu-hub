@@ -38,6 +38,8 @@ import audit.memory_audit as memory_audit  # noqa: E402
 import models  # noqa: E402
 import routes_memory  # noqa: E402
 from deps import MemoryEntry  # noqa: E402
+from hub_core import SyncHub  # noqa: E402
+from hub_mixins.memory import MemoryMixin  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -65,11 +67,12 @@ def hub(monkeypatch):
     """模块级 hub 单例：强制无向量栈/无 embedding 模型（纯写路径，去掉重干扰）。"""
     h = routes_memory.hub
 
-    async def _no_model():
+    async def _no_model(self):
         return None
 
     monkeypatch.setattr(h, "_chroma_collection", None)
-    monkeypatch.setattr(h, "_ensure_embedding_model", _no_model)
+    # CD-114：类级打桩（实例级会给单例留下永久实例属性，遮蔽后续类级 monkeypatch）
+    monkeypatch.setattr(SyncHub, "_ensure_embedding_model", _no_model)
     monkeypatch.setattr(h, "_shadow", None)
     return h
 
@@ -172,7 +175,8 @@ def test_f5_fts_failure_not_blocking_and_warns(env, hub, monkeypatch, caplog):
     async def _boom(*args, **kwargs):
         raise sqlite3.OperationalError("no such table: memory_pool_fts")
 
-    monkeypatch.setattr(hub, "_sync_memory_fts", _boom)
+    # CD-114：类级打桩（实例级会给单例留下永久实例属性，遮蔽后续类级 monkeypatch）
+    monkeypatch.setattr(MemoryMixin, "_sync_memory_fts", _boom)
     with caplog.at_level(logging.WARNING):
         res = _store(hub, "k1", CONTENT_A)
     assert res["status"] == "stored", "FTS 同步失败不得阻塞业务写入（D4 可用性优先）"

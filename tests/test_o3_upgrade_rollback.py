@@ -42,6 +42,11 @@ def test_hello_payload_has_agent_version():
     hub_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     agent_env_path = os.path.join(
         os.path.dirname(hub_root), "sync-hub-agent", "backend", "envelope.py")
+    if not os.path.exists(agent_env_path):
+        # CD-075 处置变更（2026-09-23 b07a6f0）：Agent 端仓已归档（tar.gz 存
+        # E:\星枢-待办\_sync\sync-hub-agent-archive-2026-09-23\）并删除，
+        # 退出交付面 —— 本用例是跨仓耦合校验，仓不在即 skip（不再假红）。
+        pytest.skip("Agent 端仓不存在（CD-075 已归档删除）")
     spec = importlib.util.spec_from_file_location("agent_envelope", agent_env_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

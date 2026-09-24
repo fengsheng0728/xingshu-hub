@@ -109,10 +109,19 @@ def cmd_backup(out_dir: str, db_path: str, chroma_path: str) -> dict:
             f"INSERT OR REPLACE INTO {MARKER_TABLE} (marker_id, created_at)"
             " VALUES (?, ?)", (marker_id, _utc_iso()))
         conn.commit()
-        # VACUUM INTO 到目标文件
-        conn.execute(
-            f"VACUUM INTO '{db_backup.replace(chr(39), chr(39)*2)}'"
-        )
+        # VACUUM INTO 到目标文件（失败时清掉半截残留——结果 dict 尚未登记它，
+        # 运维按目录清扫会把半成品当有效备份）
+        try:
+            conn.execute(
+                f"VACUUM INTO '{db_backup.replace(chr(39), chr(39)*2)}'"
+            )
+        except Exception:
+            if os.path.exists(db_backup):
+                try:
+                    os.remove(db_backup)
+                except OSError:
+                    pass
+            raise
     finally:
         conn.close()
     result["sqlite"] = db_backup
@@ -145,6 +154,28 @@ def cmd_backup(out_dir: str, db_path: str, chroma_path: str) -> dict:
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     result["manifest"] = manifest_path
+    # CD-103：manifest.json 是覆盖式单文件（下次备份即不代表旧快照）。
+    # 除更新它之外按快照 ts 落一份配套 manifest.<ts>.json，旧快照仍可 verify/restore。
+    paired_path = os.path.join(out_dir, f"manifest.{ts}.json")
+    with open(paired_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
+    result["manifest_snapshot"] = paired_path
+    # 孤儿配套 manifest 自愈清理：配套 sync_hub.<ts>.db 已被清（maintenance
+    # 按 mtime 清旧快照；该文件在修复白名单外不可改）后，其 manifest.<ts>.json
+    # 随下一次备份连带清掉，等价于「清旧快照连同配套 manifest」。
+    try:
+        for fname in os.listdir(out_dir):
+            if not (fname.startswith("manifest.") and fname.endswith(".json")):
+                continue
+            _ts = fname[len("manifest."):-len(".json")]
+            if _ts and not os.path.exists(
+                    os.path.join(out_dir, f"sync_hub.{_ts}.db")):
+                try:
+                    os.remove(os.path.join(out_dir, fname))
+                except OSError:
+                    pass
+    except OSError:
+        pass
     result["tables"] = len(manifest["tables"])
     return result
 
@@ -152,7 +183,35 @@ def cmd_backup(out_dir: str, db_path: str, chroma_path: str) -> dict:
 # ================= restore =================
 
 
-def _load_manifest(backup_dir: str) -> dict:
+def _snapshot_ts(snapshot: str) -> str:
+    """sync_hub.<ts>.db → <ts>（CD-103）；不匹配返回空串。"""
+    name = os.path.basename(snapshot)
+    if name.startswith("sync_hub.") and name.endswith(".db"):
+        return name[len("sync_hub."):-len(".db")]
+    return ""
+
+
+def _split_snapshot_arg(path: str) -> tuple:
+    """--from 既接受备份目录、也接受具体快照文件路径（sync_hub.<ts>.db）；
+    后者拆成 (备份目录, 快照文件名)，_load_manifest 优先读配套 manifest.<ts>.json。"""
+    if (os.path.isfile(path)
+            and os.path.basename(path).startswith("sync_hub.")
+            and path.endswith(".db")):
+        return os.path.dirname(path) or ".", os.path.basename(path)
+    return path, ""
+
+
+def _load_manifest(backup_dir: str, snapshot: str = "") -> dict:
+    # CD-103：指定快照时优先读配套 manifest.<ts>.json（manifest.json 已被后续
+    # 备份覆盖，不再代表旧快照）；无配套文件回落 manifest.json（旧备份兼容，
+    # marker 错位会按校验失败报出，不会静默通过）。
+    if snapshot:
+        ts = _snapshot_ts(snapshot)
+        if ts:
+            paired = os.path.join(backup_dir, f"manifest.{ts}.json")
+            if os.path.exists(paired):
+                with open(paired, "r", encoding="utf-8") as f:
+                    return json.load(f)
     mp = os.path.join(backup_dir, "manifest.json")
     if not os.path.exists(mp):
         raise FileNotFoundError(f"备份目录缺少 manifest.json: {backup_dir}")
@@ -160,9 +219,10 @@ def _load_manifest(backup_dir: str) -> dict:
         return json.load(f)
 
 
-def _verify_backup(backup_dir: str) -> dict:
-    """校验备份完整性（只读）：marker 对齐 / 表计数 / SQLite 可打开 / hash chain。"""
-    manifest = _load_manifest(backup_dir)
+def _verify_backup(backup_dir: str, snapshot: str = "") -> dict:
+    """校验备份完整性（只读）：marker 对齐 / 表计数 / SQLite 可打开 / hash chain。
+    CD-103：snapshot 指定具体快照（sync_hub.<ts>.db 文件名）时按其配套 manifest 校验。"""
+    manifest = _load_manifest(backup_dir, snapshot)
     issues = []
     checks = {}
 
@@ -235,8 +295,29 @@ def _verify_backup(backup_dir: str) -> dict:
 
 
 def cmd_restore(backup_dir: str, db_path: str, chroma_path: str,
-                do_verify: bool = True) -> dict:
-    manifest = _load_manifest(backup_dir)
+                do_verify: bool = True, snapshot: str = "") -> dict:
+    manifest = _load_manifest(backup_dir, snapshot)
+
+    # 活库检测：Hub 运行中恢复 = 裸拷目标库与在跑的 WAL/写锁错位，必出坏库。
+    # ① -wal 存在且非空（含崩溃残留——新库文件会被旧 WAL 重放污染）→ 拒绝；
+    # ② BEGIN IMMEDIATE 抢独占写锁失败（其它进程持有写事务）→ 拒绝。
+    if os.path.exists(db_path):
+        _wal = db_path + "-wal"
+        if os.path.exists(_wal) and os.path.getsize(_wal) > 0:
+            raise RuntimeError(
+                f"目标库 WAL 非空（{_wal}），Hub 可能在运行或有崩溃残留——"
+                "请先停止 Hub（或先打开一次库让 WAL 收编）再执行 restore")
+        _probe = _connect(db_path)
+        try:
+            _probe.execute("PRAGMA busy_timeout = 1500")
+            _probe.execute("BEGIN IMMEDIATE")
+            _probe.execute("ROLLBACK")
+        except sqlite3.OperationalError as _e:
+            raise RuntimeError(
+                f"目标库被其它进程占用（{_e}）——请先停止 Hub 再执行 restore"
+            ) from None
+        finally:
+            _probe.close()
 
     # 0) 恢复前自动备份当前库（防误操作）
     safety_backup = os.path.join(backup_dir, "pre-restore-safety.db")
@@ -252,12 +333,20 @@ def cmd_restore(backup_dir: str, db_path: str, chroma_path: str,
     src_db = os.path.join(backup_dir, manifest.get("sqlite", ""))
     if not os.path.exists(src_db):
         raise FileNotFoundError(f"备份 SQLite 缺失: {src_db}")
-    # 安全：目标文件先备份为 .pre-restore
+    # 安全：目标文件先备份为 .pre-restore（VACUUM INTO 一致性快照，与上方
+    # pre-restore-safety 备份同口径——裸 copy2 在 WAL 模式下拿到的是旧快照）
     if os.path.exists(db_path):
         pre = db_path + ".pre-restore"
         try:
-            shutil.copy2(db_path, pre)
-        except OSError:
+            if os.path.exists(pre):
+                os.remove(pre)  # VACUUM INTO 要求目标不存在；旧快照已过期
+            _pre_conn = _connect(db_path)
+            try:
+                _pre_conn.execute(
+                    f"VACUUM INTO '{pre.replace(chr(39), chr(39)*2)}'")
+            finally:
+                _pre_conn.close()
+        except Exception:
             pass
     shutil.copy2(src_db, db_path)
     result = {"restored_sqlite": db_path, "from": src_db}
@@ -280,7 +369,7 @@ def cmd_restore(backup_dir: str, db_path: str, chroma_path: str,
 
     # 3) verify
     if do_verify:
-        result["verify"] = _verify_backup(backup_dir)
+        result["verify"] = _verify_backup(backup_dir, snapshot)
     return result
 
 
@@ -366,9 +455,13 @@ def cmd_agent_create(agent_id: str, agent_name: str, role: str,
 
 
 def _key_scope_from_flags(endpoints: str, data_domain: str, level_cap: str,
-                         methods: str = "") -> dict:
-    """CLI scope 参数 → scope dict(空值省略; 与 _DEFAULT_SCOPE 的合并在 key_scopes.create 内)"""
+                         methods: str = "", ws: bool = False) -> dict:
+    """CLI scope 参数 → scope dict(空值省略; 与 _DEFAULT_SCOPE 的合并在 key_scopes.create 内)
+    CD-095：ws=True 透传 scope.ws=true（与 REST POST /api/v1/keys 的 ws 口径对齐——
+    routes_ws._ws_auth_accept：scoped key 需显式 scope.ws 才放行 WS 首帧鉴权）。"""
     scope = {}
+    if ws:
+        scope["ws"] = True
     eps = [e.strip() for e in (endpoints or "").split(",") if e.strip()]
     if eps:
         scope["endpoints"] = eps
@@ -386,7 +479,7 @@ def _key_scope_from_flags(endpoints: str, data_domain: str, level_cap: str,
 
 def cmd_key_create(agent_id: str, endpoints: str, data_domain: str,
                    level_cap: str, expires: str, db_path: str,
-                   methods: str = "") -> dict:
+                   methods: str = "", ws: bool = False) -> dict:
     """B1: 签发 scoped key(S1K)。agent 必须已预建(agent create)——key 绑定其身份,
     全权 api_key 仅管理员持有, 交付外部协作者的只有这张受限 key。明文仅此一次可见。
     创建者记 created_by='hub-cli'(与 REST /api/v1/keys 的 manager 门等价——
@@ -412,7 +505,7 @@ def cmd_key_create(agent_id: str, endpoints: str, data_domain: str,
     try:
         r = get_store(db_path).create(
             agent_id, _key_scope_from_flags(endpoints, data_domain, level_cap,
-                                            methods),
+                                            methods, ws=ws),
             created_by="hub-cli", expires_at=expires)
     except sqlite3.OperationalError as e:
         return {"status": "error", "code": 500,
@@ -497,6 +590,9 @@ def main(argv=None):
     p_kc.add_argument("--methods", default="",
                       help="HTTP 方法白名单, 逗号分隔(如 GET,HEAD; 空=不限方法)——"
                            "对外只读 key 用 GET,HEAD; 声明后按大写精确匹配, 未声明零迁移")
+    p_kc.add_argument("--ws", action="store_true",
+                      help="允许该 scoped key 建 WS 连接(scope.ws=true; CD-095, "
+                           "与 REST POST /api/v1/keys 的 ws 口径对齐; 不声明=拒连)")
     p_kc.add_argument("--expires", default="",
                       help="过期时间 ISO 格式（可选, 默认不过期）")
     p_kc.add_argument("--db", default="", help="SQLite 路径（默认 CONFIG.DB_PATH）")
@@ -554,7 +650,7 @@ def main(argv=None):
                 sys.exit(1)
             res = cmd_key_create(args.agent_id, args.endpoints, args.data_domain,
                                  args.level_cap, args.expires, db_path,
-                                 args.methods)
+                                 args.methods, ws=args.ws)
             # key 明文仅此一次可见(外部协作者凭据),随结果打印到 stdout
             print(json.dumps(res, ensure_ascii=False, indent=2))
             sys.exit(0 if res.get("status") == "created" else 1)
@@ -567,12 +663,14 @@ def main(argv=None):
             print(json.dumps(res, ensure_ascii=False, indent=2))
             sys.exit(0 if res.get("status") == "revoked" else 1)
     elif args.cmd == "verify":
-        res = _verify_backup(args.backup_dir)
+        _vdir, _vsnap = _split_snapshot_arg(args.backup_dir)
+        res = _verify_backup(_vdir, _vsnap)
         print(json.dumps(res, ensure_ascii=False, indent=2))
         sys.exit(0 if res["valid"] else 2)
     elif args.cmd == "restore":
-        res = cmd_restore(args.backup_dir, db_path, chroma_path,
-                          do_verify=not args.no_verify)
+        _rdir, _rsnap = _split_snapshot_arg(args.backup_dir)
+        res = cmd_restore(_rdir, db_path, chroma_path,
+                          do_verify=not args.no_verify, snapshot=_rsnap)
         print(json.dumps(res, ensure_ascii=False, indent=2))
         v = res.get("verify")
         if v and not v["valid"]:

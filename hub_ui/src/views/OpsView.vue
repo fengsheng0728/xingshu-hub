@@ -148,6 +148,31 @@
       </div>
     </div>
 
+    <!-- CD-084：死信队列（失败只打日志路径的兜底账本） -->
+    <div class="panel" style="margin-bottom: 16px">
+      <div class="panel-title">
+        死信队列（待处理 {{ deadLetters?.pending ?? '—' }} / 共 {{ deadLetters?.total ?? '—' }}）
+      </div>
+      <table v-if="deadLetterList.length" class="table">
+        <thead><tr><th>#</th><th>来源</th><th>类型</th><th>错误</th><th>失败时间</th><th>状态</th><th></th></tr></thead>
+        <tbody>
+          <tr v-for="d in deadLetterList" :key="d.id" @click="open('死信详情', d)">
+            <td data-mono>{{ d.id }}</td>
+            <td data-mono>{{ d.source }}</td>
+            <td>{{ d.kind || '—' }}</td>
+            <td :title="d.error">{{ (d.error || '').slice(0, 60) || '—' }}</td>
+            <td data-mono>{{ fmtTime(d.failed_at) }}</td>
+            <td><span class="badge"><span class="lamp" :class="d.retried ? 'on-ok' : 'on-danger'"></span>{{ d.retried ? '已重试' : '待处理' }}</span></td>
+            <td><button v-if="!d.retried" class="btn" @click.stop="retryDead(d.id)">重试</button></td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-else class="empty">
+        <div class="empty-title">无死信</div>
+        <div class="empty-desc">自动化连失败停用 / 通知发送失败 / 维护任务异常会落到这里，可按来源重试</div>
+      </div>
+    </div>
+
     <!-- Agent 在线表 -->
     <div class="panel">
       <div class="panel-title">Agent 在线状态（{{ agentList.length }}）</div>
@@ -203,6 +228,8 @@ const degraded = computed(() => (health.value?.status || 'ok') !== 'ok')
 const warnings = computed(() => health.value?.warnings || [])
 const quotaList = computed(() => ops.quotas?.quotas || [])
 const agentList = computed(() => dash.data?.agents?.list || [])
+const deadLetters = computed(() => ops.deadLetters)
+const deadLetterList = computed(() => ops.deadLetters?.items || [])
 const offlineCount = computed(() => agentList.value.filter((a) => a.status !== 'online').length)
 
 const wsLamp = computed(() =>
@@ -255,6 +282,9 @@ function fmtTime(iso) {
 }
 function open(title, raw) {
   ui.openDrawer({ title, raw })
+}
+async function retryDead(id) {
+  try { await ops.retryDeadLetter(id) } catch (e) { ops.error = e.message || '重试失败' }
 }
 </script>
 

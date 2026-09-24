@@ -273,7 +273,7 @@ def test_all_route_modules_mounted():
         aliases_of.setdefault(mod, []).append(alias)
 
     modules = sorted(mod for mod in extracted if mod != "routes")
-    assert len(modules) == 27, f"routes_*.py 模块数变化: {len(modules)}: {modules}"
+    assert len(modules) == 28, f"routes_*.py 模块数变化: {len(modules)}: {modules}"  # CD-085a：新增 routes_activity（28）；再变即须显式确认挂载
 
     table, unmounted = [], []
     for mod in modules:

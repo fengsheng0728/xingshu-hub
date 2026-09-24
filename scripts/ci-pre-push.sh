@@ -6,6 +6,11 @@
 # 基线（2026-09-02 实测）：468 passed + 60 skipped + 5 deselected + 0 failed/errors
 set -u
 
+# CD-102：固化 UTF-8 模式——中文 Windows 下子进程默认 GBK 解码会产出伪影失败用例
+# （test_key_issue_e2e / test_register_guard / test_scoped_key_readonly /
+# test_optional_vector_stack，共 14 例），export PYTHONUTF8=1 消除平台差异
+export PYTHONUTF8=1
+
 echo "▶ 本地 CI 门禁：全量离线集回归（~3min，基线 468 passed）..."
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"

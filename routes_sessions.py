@@ -73,7 +73,8 @@ async def api_session_handoff(
         raise HTTPException(status_code=400,
             detail=f"目标 Agent {req.to_agent_id} 不在线（未连接 WS）")
     try:
-        await ws.send_json({
+        # CD-098：直发改走 per-agent 发送锁（在线判空保留，发送持锁防帧交错）
+        delivered = await notifications.safe_send(req.to_agent_id, {
             "type": "session.handoff",
             "from_agent_id": req.from_agent_id,
             "to_agent_id": req.to_agent_id,
@@ -86,6 +87,10 @@ async def api_session_handoff(
     except Exception as e:
         raise HTTPException(status_code=400,
             detail=f"向 {req.to_agent_id} 推送失败: {e}")
+    if delivered == 0:
+        # 死连接/零投递：safe_send 已清理死连接并落死信，恢复「离线直接报错」契约
+        raise HTTPException(status_code=400,
+            detail=f"目标 Agent {req.to_agent_id} 不在线（WS 投递失败：无可用连接）")
     # 审计
     try:
         await hub._log_event("session_handoff", req.from_agent_id,

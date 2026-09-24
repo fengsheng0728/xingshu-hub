@@ -191,6 +191,10 @@ class DisclosureOpsMixin:
             next_phase = req["new_phase"]
             now = datetime.now(timezone.utc).isoformat()
 
+            # 请求人不得审批自己的披露请求（防自审：单审路径与双人审两棒统一拦截）
+            if approver_id and approver_id == agent_id:
+                return {"status": "error", "error": "请求人不得审批自己的披露请求（防自审）"}
+
             # 双人审第二棒：同一审批人不能二次批准（防自审）
             if req["status"] == "pending_second":
                 if approver_id == (req.get("first_approver") or ""):
@@ -243,9 +247,9 @@ class DisclosureOpsMixin:
                     "first_approver": approver_id,
                 }
 
-            # 通知 worker
+            # 通知 worker（CD-098：判空保留；发送走 per-agent 锁防帧交错）
             if agent_id in self.active_ws:
-                await self.active_ws[agent_id].send_json({
+                await notifications.safe_send(agent_id, {
                     "msg_type": "disclosure_approved",
                     "request_id": request_id,
                     "task_id": task_id,
@@ -302,9 +306,9 @@ class DisclosureOpsMixin:
                 (now, approver_id, request_id),
             )
 
-            # 通知 worker
+            # 通知 worker（CD-098：判空保留；发送走 per-agent 锁防帧交错）
             if agent_id in self.active_ws:
-                await self.active_ws[agent_id].send_json({
+                await notifications.safe_send(agent_id, {
                     "msg_type": "disclosure_denied",
                     "request_id": request_id,
                     "task_id": task_id,

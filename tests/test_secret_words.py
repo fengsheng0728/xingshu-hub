@@ -145,6 +145,14 @@ def test_words_endpoint_permission():
                             body={"agent_id": "k3-manager", "agent_name": "m", "role": "manager"})
         assert st == 200, f"register manager 失败: {st} {body[:100]}"
         manager_key = json.loads(body)["api_key"]
+        # CD-099: 首注强制 worker，自报 role 不采信；由管理端直改 DB 预置 manager，
+        # 再心跳刷新内存镜像（CD-023 心跳全量重载身份字段）
+        _c = sqlite3.connect(tmpdb)
+        _c.execute("UPDATE agents SET role='manager' WHERE agent_id='k3-manager'")
+        _c.commit()
+        _c.close()
+        st, body = http_req("POST", "/api/v1/agents/k3-manager/heartbeat", token=manager_key, body={})
+        assert st == 200, f"manager heartbeat 失败: {st} {body[:100]}"
         print(f"  debug worker_key[:8]={worker_key[:8]} manager_key[:8]={manager_key[:8]}")
 
         # worker 查看 → 403

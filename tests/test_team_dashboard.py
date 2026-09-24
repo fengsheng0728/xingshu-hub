@@ -104,6 +104,14 @@ def test_t1_2_stats_agents_tasks_memory_automation(client):
     # 双 agent(manager + worker)
     _create_agent(client, "team-a", "团队甲", role="manager")
     _create_agent(client, "team-b", "团队乙")
+    # CD-099: 首注强制 worker，自报 role 不采信；manager 态由管理端预置（直改 DB + 内存镜像，
+    # 等价 hub_cli 建号路径，与 tests/test_register_role_preserve.py 同口径）
+    from hub_core import hub as _hub
+    _c = _hub._db()
+    _c.execute("UPDATE agents SET role='manager' WHERE agent_id='team-a'")
+    _c.commit()
+    _c.close()
+    _hub.agents["team-a"]["role"] = "manager"
     # a 心跳上线
     r = client.post("/api/v1/agents/team-a/heartbeat", json={})
     assert r.status_code == 200

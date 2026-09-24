@@ -1,0 +1,13 @@
+# 星枢 Sync Hub — 可选 LLM 调用级 trace 依赖（CD-085(c)）
+# 安装: pip install -r requirements-otel.txt（需先装核心: pip install -r requirements.txt）
+#
+# 可选：仅当需要 LLM 调用级 trace 时安装；未安装时 tracing.py 自动降级为 no-op。
+# 默认关闭，需再设 SYNC_HUB_LLM_TRACE=1 或 OTEL_EXPORTER_OTLP_ENDPOINT 才会导出。
+#
+# 钉版风格与 requirements.txt 一致（~= 锁兼容范围，允许补丁级升级，禁止跨次版本漂移）。
+# 版本基准：本机（Python 3.14）已装 opentelemetry-api / -sdk = 1.43.0（pip freeze 实测）；
+# exporter 同 release train 对齐 1.43.x（同版本发布，安装器解析；本任务禁止 pip install，未实测安装）。
+
+opentelemetry-api~=1.43.0
+opentelemetry-sdk~=1.43.0
+opentelemetry-exporter-otlp-proto-http~=1.43.0
